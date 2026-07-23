@@ -1,0 +1,445 @@
+# =============================================================================
+# Default values for the AGOGE VX Helm chart.
+#
+# This file mirrors customer_pack/docker/.env.example. Override per environment with
+#   helm install ... -f values-staging.yaml
+# Secrets (postgres.password) must NEVER be committed — pass via --set or a
+# pre-created Secret (postgres.existingSecret).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Images — the same nine images ghcr_push.ps1 publishes for the Compose path.
+# -----------------------------------------------------------------------------
+image:
+  registry: ghcr.io
+  org: agoge-io            # AGOGEVX_GHCR_ORG
+  version: "2.24"           # AGOGEVX_VERSION — the release tag to deploy
+  pullPolicy: IfNotPresent # use Never to run locally-built images on Docker Desktop
+  names:
+    api: agogevx-api
+    matcher: agogevx-matcher
+    ingestion: agogevx-ingestion
+    report: agogevx-report
+    maintenance: agogevx-maintenance
+    bte: agogevx-bte
+    auditForward: agogevx-audit-forward
+    mcp: agogevx-mcp
+    frontend: agogevx-frontend
+    postgres: agogevx-postgres
+    pgbouncer: agogevx-pgbouncer
+
+# Pre-created dockerconfigjson Secret(s) granting pull access to the private
+# GHCR images. Create with:
+#   kubectl create secret docker-registry ghcr-creds \
+#     --docker-server=ghcr.io --docker-username=<u> --docker-password=<PAT> -n agogevx
+# Set to [] when using locally-built images with image.pullPolicy=Never.
+imagePullSecrets:
+  - name: ghcr-creds
+
+# Public hostname the SPA + Caddy serve on. Keep "localhost" on Docker Desktop.
+# NEVER an IP — IP-SAN self-signed certs trigger TLS errors in browsers.
+domain: localhost
+
+# Deployment-mode selector (compose | ingress | loadbalancer).
+#   compose      (default) = single-node: the api issues certs (lego), pushes
+#                Caddy config, and the frontend Caddy terminates TLS. api/frontend
+#                pinned to 1.
+#   loadbalancer = multi-node, self-contained: a Service type=LoadBalancer is the
+#                external entry and the frontend Caddy obtains its OWN Let's Encrypt
+#                cert (ACME). No nginx-ingress, no cert-manager. api scales to N;
+#                frontend stays 1. The recommended cloud default — see
+#                values-multinode.yaml. Keep ingress.enabled=false.
+#   ingress      = multi-node behind an EXISTING nginx-ingress + cert-manager
+#                (regulated/shared clusters, e.g. IL5). Set together with
+#                ingress.enabled=true (see values-ingress.yaml).
+# Both loadbalancer and ingress gate off the api's TLS boot actions + lock the
+# in-app TLS routes; only compose has the api manage TLS.
+deployMode: compose
+
+# -----------------------------------------------------------------------------
+# PostgreSQL
+# -----------------------------------------------------------------------------
+postgres:
+  # REQUIRED at install. Either set this (via --set, NOT committed) or point
+  # existingSecret at a Secret that holds a POSTGRES_PASSWORD key.
+  password: ""
+  existingSecret: ""       # name of a Secret with key POSTGRES_PASSWORD
+  database: vulndb
+  user: vulndb
+  memLimit: 16Gi           # container memory limit (compose mem_limit: 16g)
+  shmSize: 1Gi             # /dev/shm size (compose shm_size: 1g)
+
+  # External / managed Postgres (DO / RDS / Cloud SQL / Azure / self-managed).
+  # See plans/finished/external-database-support.md. WRITTEN BY vxctl — do
+  # not hand-edit. When enabled:
+  #   - the in-cluster db StatefulSet + its postgres-data PVC + db Service are
+  #     NOT rendered;
+  #   - the app talks to `host` over TLS, either via our pgbouncer (db.route=
+  #     pgbouncer, pooled, default — required for the 100k target) or directly
+  #     (db.route=direct, no pooler — small fleets / provider-supplied pooler);
+  #   - POSTGRES_PASSWORD (the external DB password) still comes from the
+  #     postgres secret; the CA comes from caCertSecret (key ca.crt).
+  external:
+    enabled: false
+    host: ""               # external hostname (NEVER an IP — IP-SAN TLS errors)
+    port: 5432
+    database: vulndb       # may differ from the in-cluster default (e.g. DO defaultdb)
+    user: vulndb           # may differ (e.g. DO doadmin)
+    sslMode: verify-full   # verify-full (default) | require (encrypt-only downgrade)
+    caCertSecret: agogevx-db-ca  # Secret with key ca.crt → mounted /etc/valex/db-ca.crt
+
+# Route api + workers straight to Postgres ("direct") or through the
+# transaction-mode PgBouncer pool ("pgbouncer"). Use "pgbouncer" past ~10k agents.
+# In external mode this selects the sub-mode: "pgbouncer" = pooled (our pgbouncer
+# fronts the external DB), "direct" = app dials the external DB (no pooler).
+db:
+  route: direct            # "direct" | "pgbouncer"
+
+# -----------------------------------------------------------------------------
+# PgBouncer (transaction-mode pool). Mirrors customer_pack/docker compose env.
+# -----------------------------------------------------------------------------
+pgbouncer:
+  # HA floor (ha-floor-no-spof): 3 poolers on EVERY k8s deployment — removes the
+  # request-path SPOF AND lifts the single-threaded-relay throughput ceiling we hit
+  # at 100k (≈3 relay cores). This is a k8s/helm value only; the Docker Compose path
+  # runs a single pgbouncer service (one host can't survive its own failure). On a
+  # 1-node cluster the 3 pods co-locate (soft spread) — real HA needs ≥3 nodes.
+  replicas: 3
+  # CONNECTION BUDGET INVARIANT. When db.route=pgbouncer (l/xl tiers) the poolers
+  # front the whole stack and are the dominant upstream-connection source:
+  #     pgbouncer.replicas × defaultPoolSize  ≤  DB max_connections − ~30 reserve
+  # 3 × 100 = 300 upstream fits the in-cluster Postgres (raised to max_connections
+  # 350 in db-config.yaml; ~20-25 headroom after the reserve-pool burst + ingestion's
+  # direct CONCURRENTLY/advisory conns) and a ≥397-conn managed DB. Was 200 (a single-
+  # pooler ceiling). Raise the pool ONLY after raising the DB's max_connections.
+  defaultPoolSize: 100
+  minPoolSize: 5
+  reservePoolSize: 5
+  maxClientConn: 500
+  serverLifetime: 3600
+  serverIdleTimeout: 600
+
+# -----------------------------------------------------------------------------
+# api — pinned to 1 replica under compose mode (shared bootstrap-config volume +
+# runtime Caddy admin push). Under ingress mode (multi-node) it un-pins: secrets
+# come from the agogevx-secrets Secret and config from app_settings (no RWX
+# volume), blobs go to S3, then raise replicas. See the chart README
+# "Scaling / multi-node" section.
+# -----------------------------------------------------------------------------
+api:
+  # Only honoured under ingress mode (multi-node). Under compose mode the api is
+  # always 1 (RWO bootstrap volume + Caddy admin push to a single frontend pod).
+  # Safe to run >1 from the very first boot: vxctl mints the full secret set at
+  # install (crypto secrets + Fernet BOOTSTRAP_KEY + pgbouncer password) into
+  # agogevx-secrets, and non-secret config lives in app_settings — so every replica
+  # reads identical secrets/config with no first-boot ordering or restart.
+  replicas: 1
+  dbPoolSize: 10
+  # Name of a Secret (created out-of-band by `vxctl`, never committed) holding
+  # the first-boot crypto secrets SECRET_KEY / API_KEY_PEPPER / AGENT_TOKEN_PEPPER /
+  # MFA_ENCRYPTION_KEY. Injected into the api as env (optional — a missing Secret
+  # is fine; the setup wizard then self-generates them). Set "" to disable injection.
+  appSecretsSecret: agogevx-secrets
+  # Memory: a reserved 1Gi base (the main HTTP server — pools, caches, ~340 routes)
+  # that can burst up to the 3Gi ceiling under load. Overrides the global `resources`
+  # default via the componentResources helper (like matcher). request < limit =
+  # Burstable QoS: guaranteed 1Gi, expands toward 3Gi when the node has spare RAM.
+  # cpu request left at the global 50m (memory-only sizing).
+  resources:
+    requests:
+      cpu: 50m
+      memory: 1Gi
+    limits:
+      memory: 3Gi
+
+# -----------------------------------------------------------------------------
+# Workers. Replica counts are the primary scale knobs (matcher first).
+# -----------------------------------------------------------------------------
+matcher:
+  replicas: 1              # <=1k:1  1k-10k:2-4  10k-50k:5-10  50k-100k:10  250k:20-30
+  # MUST stay >= 2 x concurrency (8). pool <= concurrency deadlocks under saturation
+  # (job holds its tx conn + needs a 2nd for the AffectedProductsCache fill). The old
+  # "drop to 2 at high replica counts" guidance shipped that deadlock — superseded by
+  # the 2026-06-22 250k load test. Watch the PgBouncer relay cap (replicas x 8 upstream),
+  # not the pool floor: raise pgbouncer.defaultPoolSize before scaling matchers past it.
+  dbPoolSize: 8
+  dbMaxOverflow: 0
+  # Dedicated DIRECT-to-Postgres pool for the AffectedProductsCache miss-load
+  # (Option B, plans/matcher-pool-deadlock-fix.md). Separate from dbPoolSize so a
+  # cache fill never draws a 2nd connection from the job pool a transaction already
+  # holds — the pool-exhaustion deadlock is then structurally impossible regardless
+  # of dbPoolSize vs concurrency. Bypasses pgbouncer (counts only against the DB
+  # max_connections as replicas x cacheDbPoolSize, NOT the relay cap). 2 is plenty —
+  # singleflight dedupes concurrent misses for the same product name.
+  cacheDbPoolSize: 2
+  pollIntervalMs: 500
+  jobTimeoutSeconds: 300
+  maxRetries: 3
+  concurrency: 4
+  # The matcher is the memory-heaviest worker (full-detail hosts x concurrency).
+  # Override the global `resources` default with its own 3Gi request==limit, sized
+  # from the 25k ramp (a 2Gi limit OOMKilled at concurrency 4 — see
+  # plans/k8s-loadtest-capacity-sizing.md). request==limit so the scheduler reserves
+  # the worst case and packs deterministically (~4/node on s-8vcpu-16gb), and a
+  # correlated spike can't overflow the node. vxctl `--node-mem-gib` overwrites
+  # these via --set when sizing a specific node; pkg/memlimit derives GOMEMLIMIT
+  # (~90%) from whatever limit is set so the GC degrades instead of OOMing.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 3Gi
+    limits:
+      memory: 3Gi
+  # Dedicated matcher-pool placement. All empty by default = no-op (single-pool /
+  # Docker Desktop installs are unaffected). To pin matchers to a tainted DO pool:
+  #   nodeSelector: { doks.digitalocean.com/node-pool: <matcher-pool-name> }
+  #   tolerations:  [ { key: workload, operator: Equal, value: matcher, effect: NoSchedule } ]
+  nodeSelector: {}
+  tolerations: []
+  # Spread matchers evenly across the matcher-pool nodes (soft — never blocks
+  # scheduling). Independent of scheduler scoring config.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: agogevx
+          app.kubernetes.io/component: matcher-worker
+
+ingestion:
+  # HA floor: dev/compose 1; multi-node 3 (values-multinode.yaml). Advisory-lock
+  # arbitrated, so the extra replicas are warm standbys — only one runs each sync.
+  replicas: 1
+  dbPoolSize: 5
+  nvdApiKey: ""            # optional; also settable via the setup wizard
+  msrcApiKey: ""           # optional
+  # Burstable memory headroom for ingestion only (plans/uct-sync-oom-fix.md
+  # WS5 / decision D3): the UCT parser fix targets <1Gi, this is insurance
+  # while the Ubuntu dataset grows. Small reservation, 4Gi ceiling — no other
+  # component is affected (they keep the global `resources:` block).
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 4Gi
+
+report:
+  replicas: 1
+  dbPoolSize: 4
+  concurrency: 2
+
+# maintenance-worker — hosts the heavy operational scheduler loops relocated
+# from the api (asset-summary, network-reclassify, advisory-index, retention,
+# nightly housekeeping, object-storage backup) plus the async DB-restore
+# drainer. Single replica is enough; each loop self-arbitrates across replicas
+# via pg_try_advisory_*lock.
+maintenance:
+  replicas: 1
+  # 6, not 4: the restore drainer now runs here and holds ~2 conns during a
+  # restore (the ImportBackup tx + the monitor's progress writer). Worst-case
+  # overlap = restore(2) + scheduled backup(2) + retention(1) + housekeeping(1).
+  # Trivial against PgBouncer limits (3 replicas x 6 = 18).
+  dbPoolSize: 6
+  # Memory: 512Mi reserved base (scheduler loops + the object-storage backup
+  # pg_dump stream) that can burst up to an 8Gi ceiling. The large headroom is
+  # for the async DB-restore drainer that now runs here: an intel restore streams
+  # and inserts the whole intel archive and OOMKilled at 1Gi (stage, 2026-07-03),
+  # so it's sized well above any observed peak. Only one replica restores at a
+  # time (single-flight), and 8Gi is half a 16Gi node, so the other pods on the
+  # node keep ample room. request < limit = Burstable QoS; the 512Mi request
+  # keeps all 3 replicas schedulable. cpu request left at the global 50m.
+  # Overrides the global `resources` default via the componentResources helper.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 512Mi
+    limits:
+      memory: 8Gi
+
+bte:
+  replicas: 1
+  dbPoolSize: 8
+  dbMaxOverflow: 4
+
+auditForward:
+  replicas: 1
+  dbPoolSize: 4
+
+# MCP server — read-only vulnerability-intelligence tools over streamable HTTP
+# for external AI clients (behind Caddy at /mcp). OFF unless mcp_enabled +
+# Business "mcp" license. Analyst-volume, off the agent check-in path → a small
+# pool is plenty. On K8s, raise replicas to >=2 for the HA floor (values-
+# multinode.yaml); a single node loss must not drop MCP capacity.
+mcp:
+  replicas: 1
+  dbPoolSize: 5
+
+# -----------------------------------------------------------------------------
+# frontend — Caddy + SPA. Pinned to 1 replica in v1 (the api pushes Caddy
+# config to a single pod). External entry is a separate LoadBalancer Service.
+# -----------------------------------------------------------------------------
+frontend:
+  # Pinned to 1 under compose mode (the api pushes Caddy config to a single
+  # pod). Under ingress mode (ingress.enabled=true) this un-pins — raise it for
+  # edge throughput / HA across nodes.
+  replicas: 1
+  # Service type for the external 80/443 entry point. Docker Desktop maps
+  # LoadBalancer to localhost. On minikube use NodePort, or run `minikube tunnel`.
+  # Used in compose + loadbalancer modes; under ingress the external entry is the
+  # Ingress (this Service is not rendered).
+  serviceType: LoadBalancer
+  # Optional provider-specific annotations applied to the frontend-lb Service —
+  # e.g. DigitalOcean `service.beta.kubernetes.io/do-loadbalancer-size-unit`, AWS
+  # NLB selectors. Empty = the cloud's default load balancer.
+  lbAnnotations: {}
+  # loadbalancer-HA TLS (ha-floor-no-spof Phase 2): the api obtains the Let's
+  # Encrypt cert via HTTP-01 and publishes it into this kubernetes.io/tls Secret,
+  # which every frontend pod mounts read-only. Seeded self-signed at install
+  # (templates/frontend-tls-secret.yaml) and overwritten with the real cert after
+  # issuance. Used only in loadbalancer mode.
+  tlsSecret: agogevx-frontend-tls
+  # Optional ACME account email (Let's Encrypt expiry notices). Empty = none.
+  acmeEmail: ""
+  # Use the Let's Encrypt STAGING directory (untrusted certs, lax rate limits) to
+  # exercise issuance without burning prod rate limits. false = real certs.
+  acmeStaging: false
+
+# -----------------------------------------------------------------------------
+# Ingress + cert-manager (multi-node TLS, backlog B1). All default to OFF so the
+# single-node/compose path renders exactly the v1 objects. See values-ingress.yaml
+# for a full multi-node example, and docs kubernetes-deployment.md for the runbook.
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false           # true renders the Ingress (+ HTTP-only Caddy ConfigMap)
+  className: nginx         # IngressClass name
+  host: ""                 # REQUIRED when enabled — a real FQDN, never an IP
+  tls:
+    secretName: agogevx-tls  # K8s tls Secret nginx serves; cert-manager fills it
+  # Extra Ingress annotations. cert-manager.io/cluster-issuer drives issuance via
+  # the ingress-shim. The proxy-* annotations are REQUIRED for the DB import/export
+  # routes (nginx's 1m body / 60s timeout / buffering defaults would cut them off
+  # before Caddy's 16 GB / 1800s limits) — see values-ingress.yaml.
+  annotations: {}
+
+certManager:
+  # Name of the pre-created DNS-01 ClusterIssuer/Issuer (its dns01 solver + the
+  # DNS-provider credential Secret are created out of band — never in this chart).
+  issuerRef:
+    name: ""
+    kind: ClusterIssuer
+  # true renders an explicit Certificate (needed for a WILDCARD cert). false relies
+  # on the ingress-shim annotation, which is enough for a single FQDN over DNS-01.
+  renderCertificate: false
+
+# -----------------------------------------------------------------------------
+# Persistent storage.
+#
+# On Docker Desktop the default hostpath StorageClass is fine (storageClass "").
+# Everything is ReadWriteOnce and co-located on the single node. A MULTI-NODE
+# cluster (ingress mode) needs only ReadWriteOnce block storage + S3 — NO
+# ReadWriteMany class is required:
+#   - bootstrapConfig is NOT provisioned under ingress — secrets come from the
+#     agogevx-secrets Secret (env / mounted file) and config from app_settings (DB).
+#   - blobs go to S3 (set blobVolumeKind=emptyDir + configure the admin Storage
+#     page) — no shared blob volume needed. The all-RWX fallback keeps blobVolumeKind=pvc
+#     and sets the userUploads/reportArtifacts accessMode to ReadWriteMany instead.
+#   - postgresData is ALWAYS single-writer (RWO) and never needs RWX.
+# See README "Scaling / multi-node" and values-multinode.yaml.
+# -----------------------------------------------------------------------------
+persistence:
+  storageClass: ""               # "" = cluster default (inherited by volumes below)
+  accessMode: ReadWriteOnce      # global default inherited by any volume that doesn't override
+
+  # Where the api/report-worker blob roots (uploads + report artifacts) live.
+  #   pvc      = a shared PersistentVolumeClaim (single-node default; or RWX in the
+  #              all-RWX fallback by setting the per-volume accessMode below).
+  #   emptyDir = per-pod scratch; blobs live in S3 (multi-node default). The api's
+  #              blob PVC mounts are dropped so it can scale across nodes; configure
+  #              object storage on the admin Storage page BEFORE scaling past 1.
+  blobVolumeKind: pvc
+
+  # Per-volume accessMode / storageClass overrides. "" inherits the global value
+  # above. postgresData is pinned RWO regardless of the global default.
+  volumes:
+    postgresData:    { accessMode: ReadWriteOnce, storageClass: "" }
+    bootstrapConfig: { accessMode: "",            storageClass: "" }
+    tlsCerts:        { accessMode: "",            storageClass: "" }
+    userUploads:     { accessMode: "",            storageClass: "" }
+    reportArtifacts: { accessMode: "",            storageClass: "" }
+
+  sizes:
+    postgresData: 20Gi
+    bootstrapConfig: 1Gi
+    tlsCerts: 1Gi
+    userUploads: 5Gi
+    reportArtifacts: 2Gi
+
+# -----------------------------------------------------------------------------
+# PodDisruptionBudgets (backlog B5). OFF by default so single-node renders no PDB.
+# Enable on multi-node so a node drain can't take a service fully offline.
+# -----------------------------------------------------------------------------
+pdb:
+  enabled: false
+  minAvailable: 1                # per-workload floor during voluntary disruption
+
+# -----------------------------------------------------------------------------
+# topologySpreadConstraints (backlog B5). OFF by default. On multi-node, spread
+# api replicas across nodes (soft — ScheduleAnyway never blocks scheduling).
+# -----------------------------------------------------------------------------
+topologySpread:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# NetworkPolicy (security review #2). Default-deny INGRESS for the namespace +
+# explicit allows (frontend->api, public->frontend, app->db/pgbouncer). Egress is
+# left open (ingestion external feeds, ACME, GHCR, the managed DB). OFF by default
+# so existing installs are unchanged; enable on the cloud/multi-node deployment.
+# Requires a CNI that enforces NetworkPolicy (DOKS Cilium does; Docker Desktop
+# does not — it renders as a harmless no-op there).
+# -----------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Default resource requests/limits for the Go services + workers. Postgres has
+# its own limit (postgres.memLimit). Tune per environment.
+# -----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 3Gi
+
+# -----------------------------------------------------------------------------
+# Enterprise egress proxy (enclave). OFF by default — existing installs render
+# unchanged. When enabled, the egressing workloads get a platform-injected Envoy
+# sidecar (Kyverno) + the standard HTTP(S)_PROXY / NO_PROXY env, so all external
+# HTTPS goes through the local forward proxy. ONLY supported with
+# deployMode: ingress (the chart fails render otherwise — compose/loadbalancer
+# run the api's lego TLS path, whose pinned UDP:53 resolver a CONNECT proxy can't
+# carry). See plans/enterprise-egress-proxy-support.md.
+# -----------------------------------------------------------------------------
+egress:
+  enabled: false
+  # The platform forward proxy the injected sidecar exposes on localhost.
+  proxyUrl: http://localhost:3140
+  # Kyverno sidecar-inject secret (mTLS client cert to central egress).
+  secretName: agogevx-s2s-xm-client
+  # Base NO_PROXY. The external Postgres host (postgres.external.host) is appended
+  # automatically when postgres.external.enabled. ALSO add any host reached
+  # DIRECTLY (not through the proxy): an on-prem/LAN Seq or SIEM, plus bare
+  # in-cluster service names — suffix matching does not cover them.
+  #   e.g. localhost,127.0.0.1,.svc,.cluster.local,seq.internal.example,192.168.5.102
+  noProxy: localhost,127.0.0.1,.svc,.cluster.local
+  # Which HTTP-egress workloads get the sidecar + proxy env. Defaults match the
+  # workloads that make external HTTPS calls (feeds / S3 / email / updates). Turn
+  # matcher/bte/mcp on ONLY if application-log forwarding targets an EXTERNAL Seq
+  # (they are DB-only otherwise and reach an internal Seq directly).
+  httpWorkloads:
+    api: true
+    ingestion: true
+    report: true
+    maintenance: true

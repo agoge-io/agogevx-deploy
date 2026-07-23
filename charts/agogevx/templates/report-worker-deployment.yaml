@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: report-worker
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: report-worker
+spec:
+  replicas: {{ .Values.report.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: report-worker
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: report-worker
+        {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.report }}
+        x.com/envoy-egress-sidecar-inject: "true"
+        {{- end }}
+      {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.report }}
+      annotations:
+        x.com/envoy-egress-secret-name: {{ .Values.egress.secretName | quote }}
+      {{- end }}
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+      # Compose mode: bootstrap-config (+ report-artifacts when blobVolumeKind=pvc)
+      # are RWO, so co-locate with api. Under ingress/loadbalancer the bootstrap
+      # volume is dropped and artifacts go to S3, so the worker spreads freely.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agogevx
+                  app.kubernetes.io/component: api
+              topologyKey: kubernetes.io/hostname
+{{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread (HA floor) — keep the drain replicas on different nodes so
+      # a node loss can't pause all report rendering. ScheduleAnyway never blocks
+      # scheduling. In compose mode the podAffinity above co-locates with api
+      # instead (RWO volumes); the two never both apply.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: report-worker
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: report-worker
+          image: {{ include "agogevx.image" (list . .Values.image.names.report) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.report }}
+            {{- include "agogevx.egressProxyEnv" . | nindent 12 }}
+            {{- end }}
+            {{- include "agogevx.bootstrapKeyEnv" . | nindent 12 }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.report.dbPoolSize | quote }}
+            - name: REPORT_WORKER_CONCURRENCY
+              value: {{ .Values.report.concurrency | quote }}
+            - name: REPORT_ARTIFACT_ROOT
+              value: /app/report_artifacts
+            - name: APP_URL
+              value: {{ printf "https://%s" .Values.domain | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # Read-only root FS: rendered artifacts go to /app/report_artifacts
+            # (mounted below); /tmp is scratch for any report-render temp-file use
+            # (e.g. excelize's streaming temp dir). emptyDir keeps root read-only.
+            - name: tmp
+              mountPath: /tmp
+{{- if (include "agogevx.isCompose" .) }}
+            # app_url comes from APP_URL env; the worker decrypts S3 creds via
+            # BOOTSTRAP_KEY env — so under ingress/loadbalancer it needs no
+            # bootstrap volume.
+            - name: bootstrap-config
+              mountPath: /app/instance
+              readOnly: true
+{{- end }}
+            - name: report-artifacts
+              mountPath: /app/report_artifacts
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+            # External DB: CA for the direct-to-external TLS connection. Like
+            # api + maintenance-worker, this pod ALWAYS dials direct (bypassing
+            # pgbouncer) — the matview-refresh internal jobs (vuln-backlog,
+            # threat/attack exposure, risk-concentration, patch-history) run
+            # REFRESH MATERIALIZED VIEW CONCURRENTLY via directpg — so the CA is
+            # mounted in pooled mode too, not only the direct sub-mode.
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+        - name: bootstrap-config
+          persistentVolumeClaim:
+            claimName: bootstrap-config
+{{- end }}
+        - name: report-artifacts
+{{- if eq (.Values.persistence.blobVolumeKind | default "pvc") "pvc" }}
+          persistentVolumeClaim:
+            claimName: report-artifacts
+{{- else }}
+          # S3 multi-node default (blobVolumeKind=emptyDir): rendered artifacts go
+          # to the bucket via blobstore; this per-pod scratch dir only backs the
+          # fs fallback and the boot-time mkdir, so it need not be shared.
+          emptyDir: {}
+{{- end }}

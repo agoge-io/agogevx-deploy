@@ -1,0 +1,64 @@
+# =============================================================================
+# Alpha cluster overlay for the 250k load test.
+#
+# Apply on top of the live install values (values-agogevx.yaml) before running
+# the realistic-250k-8h profile:
+#
+#   vxctl update \
+#     --context do-sfo3-agogevx-multi-node-k8s-test \
+#     --namespace agogevx \
+#     --agogevx-version <tag> \
+#     --values deploy/helm/agogevx/values-alpha-250k.yaml
+#
+# Or via helm directly (dry-run first):
+#   helm upgrade agogevx deploy/helm/agogevx \
+#     -n agogevx \
+#     -f customer_pack/kubernetes/install_data/values-agogevx.yaml \
+#     -f deploy/helm/agogevx/values-multinode.yaml \
+#     -f deploy/helm/agogevx/values-alpha-250k.yaml \
+#     --dry-run
+#
+# Pre-requisites
+# --------------
+# 1. Resize the DO managed DB to gd-8vcpu-32gb (or larger) before applying.
+#    At 250k agents, host_vulnerabilities is ~17.5 GB. The gd-4vcpu-16gb
+#    shared_buffers (~4 GB) cannot cache the hot table and pegs DB CPU under
+#    concurrent matcher writes + autovacuum.
+#
+# 2. After the test, roll back to the 100k configuration:
+#    helm upgrade agogevx ... -f values-alpha-100k.yaml (or remove --values)
+#
+# Connection budget (verify before applying)
+# ------------------------------------------
+# PgBouncer relay: 3 replicas × defaultPoolSize=100 = 300 upstream slots.
+# DB connection limit (16-vCPU/64-GB managed DB): 997.
+# Client connections at this configuration:
+#   20 matcher  × pool=4  =  80
+#    3 api      × pool=10 =  30
+#    3 bte      × pool=8  =  24
+#    3 ingestion × pool=5 =  15
+#    1 maintenance × pool=4 =  4
+#    3 report   × pool=4  =  12
+#    3 audit-forward × pool=4 = 12
+#                           -----
+#   Total                  ~177  (≤300 at the relay; far under the 997 DB cap)
+# =============================================================================
+
+matcher:
+  # 20 is sufficient for the realistic 250k rate (~5 jobs/s, §5.3 of the analysis).
+  # Raised to 30 during the 600-worker fast run (2026-06-22): after the pool-deadlock
+  # fix, 20 matchers still couldn't out-drain the ~6× burst input, so scaled out to
+  # clear the 50k backlog. All 30 fit the 4-node cluster (30×3Gi=90Gi ≤ 120Gi).
+  # For a realistic-rate deploy, 20 is the right number.
+  replicas: 30
+  # Pool MUST exceed concurrency (4), not just match it. At pool=concurrency a
+  # matcher pod deadlocks under saturation: each of the 4 in-flight jobs holds a
+  # connection inside an open transaction, and when a job needs a SECOND
+  # connection mid-transaction (e.g. the AffectedProductsCache fill) all 4 are
+  # already taken — every goroutine waits forever (pool-exhaustion deadlock).
+  # This was invisible until the 600-worker fast run first saturated all 4 slots
+  # at once (the realistic 190-worker run never filled a pod). pool=8 = 2×
+  # concurrency gives every job a spare connection for the nested acquire.
+  # 20 × 8 = 160 client connections — still under the 3 × 100 = 300 PgBouncer
+  # relay cap and far under the DB's 997 limit.
+  dbPoolSize: 8

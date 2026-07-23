@@ -1,0 +1,160 @@
+# =============================================================================
+# Multi-node / production overrides (backlog B2 + B3 + the PDB/topology half of
+# B5). Builds on the ingress (B1) overrides — this file is the full multi-node
+# example, so use it INSTEAD of values-ingress.yaml (it includes the same
+# ingress block).
+#
+#   helm upgrade --install agogevx ./deploy/helm/agogevx \
+#     -f deploy/helm/agogevx/values-multinode.yaml \
+#     --set postgres.password=... \
+#     -n agogevx --create-namespace
+#
+# Cluster prerequisites for the DEFAULT (loadbalancer) profile — minimal:
+#   - a cloud cluster whose provider implements Service type=LoadBalancer
+#     (DOKS/EKS/GKE/AKS all do) — the chart provisions the LB itself
+#   - a real public FQDN whose DNS you control: AFTER install, point it at the
+#     load balancer's external IP; the frontend Caddy then obtains the Let's
+#     Encrypt cert for it automatically (ACME) — no cert-manager
+#   - no StorageClass setup: the cluster's default RWO class is used (storageClass:"")
+#
+# For the INGRESS profile instead (regulated/shared clusters, e.g. IL5 — set
+# deployMode=ingress + ingress.enabled=true via vxctl or --set), these must be
+# pre-installed out of band: nginx-ingress (IngressClass "nginx"), cert-manager +
+# a dns01 ClusterIssuer, and an RWO StorageClass. See kubernetes-deployment.md.
+#
+# NO RWX StorageClass is required. The former bootstrap-config RWX volume is gone:
+# under ingress the api/report-worker/audit-forward/ingestion read the Fernet key
+# (BOOTSTRAP_KEY) and crypto secrets from the agogevx-secrets Secret as env, the
+# pgbouncer password is mounted from that Secret as a file, and all non-secret
+# config + install-state lives in app_settings (Postgres). Multi-node therefore
+# needs only RWO block storage + S3. (k8s-bootstrap-secret-migration.)
+#
+# APPLICATION prerequisite (B3): configure object storage on the admin Storage
+# page (System -> Storage -> point at a private S3 bucket) BEFORE scaling the api
+# or report-worker past 1 replica. With blobVolumeKind=emptyDir below, blobs that
+# are NOT in S3 land on per-pod local disk (an avatar uploaded on pod A 404s on
+# pod B). See the runbook.
+#
+# All install secrets are minted at install by vxctl into the agogevx-secrets
+# Secret (SECRET_KEY / peppers / MFA key / BOOTSTRAP_KEY / PGBOUNCER_AUTH_PASSWORD)
+# — nothing is generated at runtime, so the api can run at N replicas from the
+# very first boot. EULA acceptance is per-user (users table); each user accepts
+# on first login.
+# =============================================================================
+
+deployMode: loadbalancer
+
+# Real public hostname. Under loadbalancer this is the name Caddy obtains the LE
+# cert for (point its DNS at the LB IP post-install). Under the ingress profile it
+# must also match ingress.host.
+domain: valex.example.com
+
+# HA FLOOR (ha-floor-no-spof): a minimum of 3 replicas of EVERY stateless
+# component, so a single node failure can't take any part of the app fully offline
+# (the pdb + topologySpread blocks at the bottom make the spread + drain-protection
+# real). vxctl scales matcher per fleet tier (3 / 4 / 10 / 20) on top of this
+# floor; the others stay flat at 3 unless a load test shows one binds. Un-pinning
+# api + frontend is safe from the very first boot — vxctl mints the full secret
+# set at install, so every replica reads identical secrets (agogevx-secrets) + config
+# (app_settings), with blobs in S3 (no bootstrap-config volume).
+api:
+  replicas: 3
+
+frontend:
+  replicas: 3
+
+# pgbouncer at 3 removes the request-path SPOF AND gives ~3 relay cores (the
+# single-threaded relay was the 100k throughput ceiling). 3 × defaultPoolSize(100)
+# = 300 upstream — fits the in-cluster Postgres (max_connections 350 in db-config.yaml)
+# and a ≥397-conn managed DB. Raise the pool only after raising the DB's
+# max_connections (see the budget invariant in values.yaml). Already the base default;
+# repeated here for the multi-node doc.
+pgbouncer:
+  replicas: 3
+
+# Warm-standby scheduler replicas — advisory-lock arbitrated, so only one runs each
+# sync; 3 so scheduling survives a node loss.
+ingestion:
+  replicas: 3
+
+# Matcher HA floor = 3. vxctl raises this per fleet tier; a plain
+# `-f values-multinode.yaml` install gets the 3-replica floor (size up past ~1k
+# agents — see CLAUDE.md operating envelopes / vxctl --fleet-tier).
+matcher:
+  replicas: 3
+
+report:
+  replicas: 3
+
+bte:
+  replicas: 3
+
+auditForward:
+  replicas: 3
+
+# INGRESS PROFILE ONLY. With deployMode=loadbalancer (the default above) this
+# whole block is inert — no Ingress is rendered. To use the ingress profile, set
+# deployMode=ingress and ingress.enabled=true (vxctl does this for you), which
+# activates the block below (and requires the out-of-band prereqs in the header).
+ingress:
+  enabled: false
+  className: nginx
+  host: valex.example.com
+  tls:
+    secretName: agogevx-tls
+  annotations:
+    # Names a pre-created ClusterIssuer whose dns01 solver holds the DNS provider
+    # credential (Secret created out of band — never in git).
+    cert-manager.io/cluster-issuer: letsencrypt-dns01
+    # REQUIRED for the DB import/export routes — nginx's defaults (1m body, 60s
+    # timeout, buffering on) would 413 / cut them off before Caddy's 16 GB /
+    # 1800s limits apply. proxy-body-size 0 defers to Caddy.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+
+certManager:
+  issuerRef:
+    name: letsencrypt-dns01
+    kind: ClusterIssuer
+  # Leave false for a single FQDN (ingress-shim handles it). Set true only for a
+  # wildcard cert.
+  renderCertificate: false
+
+persistence:
+  # No RWX volume at all. blobs → S3; secrets/Fernet key/pgbouncer password →
+  # the agogevx-secrets Secret (env / mounted file); config → app_settings.
+  # Under loadbalancer-HA (ha-floor-no-spof Phase 2) the only PVC is postgres-data
+  # (the DB): the api publishes the TLS cert into the frontend-tls Secret that every
+  # frontend pod mounts, so no tls-certs PVC is needed. Under ingress, likewise only
+  # postgres-data (cert-manager owns the cert in a Secret). No bootstrap-config PVC
+  # in either multi-node profile.
+  blobVolumeKind: emptyDir        # blobs go to S3 — no shared blob PVC
+  volumes:
+    postgresData:
+      accessMode: ReadWriteOnce
+      # "" = the cluster's default RWO StorageClass (do-block-storage on DOKS,
+      # gp3 on EKS, standard-rwo on GKE, managed-csi on AKS). Portable across
+      # providers — no named class to pre-install. Override only if you want a
+      # specific class (e.g. a replicated one).
+      storageClass: ""
+
+  # ----------------------------------------------------------------------------
+  # ALL-RWX FALLBACK (no object store): if you cannot run S3, keep blobs on a
+  # shared RWX volume instead of emptyDir. bootstrap-config still is NOT needed
+  # (secrets come from the Secret) — only the blob volumes go RWX:
+  #   blobVolumeKind: pvc
+  #   volumes:
+  #     userUploads:     { accessMode: ReadWriteMany, storageClass: openebs-rwx }
+  #     reportArtifacts: { accessMode: ReadWriteMany, storageClass: openebs-rwx }
+  #     postgresData:    { accessMode: ReadWriteOnce, storageClass: openebs-replicated }
+  # ----------------------------------------------------------------------------
+
+# Protect node drains + spread api replicas across nodes (backlog B5).
+pdb:
+  enabled: true
+  minAvailable: 1
+
+topologySpread:
+  enabled: true

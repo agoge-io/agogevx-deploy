@@ -1,0 +1,51 @@
+# =============================================================================
+# Staging overrides for Docker Desktop's single-node Kubernetes.
+#
+#   helm upgrade --install agogevx ./deploy/helm/agogevx \
+#     -f deploy/helm/agogevx/values-staging.yaml \
+#     --set postgres.password=$(openssl rand -base64 32) \
+#     -n agogevx --create-namespace
+# =============================================================================
+
+domain: localhost
+
+image:
+  # Flip to Never + drop imagePullSecrets to run images you built locally
+  # (Docker Desktop shares its image store with its Kubernetes node).
+  pullPolicy: IfNotPresent
+
+# Single-node staging: one of everything.
+matcher:
+  replicas: 1
+report:
+  replicas: 1
+bte:
+  replicas: 1
+auditForward:
+  replicas: 1
+
+# Route directly to Postgres at staging scale.
+db:
+  route: direct
+
+frontend:
+  # Docker Desktop binds LoadBalancer to localhost:80/443. On minikube switch
+  # to NodePort (and reach it via `minikube service`) or run `minikube tunnel`.
+  serviceType: LoadBalancer
+
+# Laptop-friendly Postgres ceiling. The baked postgresql.conf is tuned for
+# production; if Postgres OOMs on a small machine, lower this AND the conf is
+# image-baked, so prefer giving Docker Desktop enough memory (>= 6 GB).
+postgres:
+  memLimit: 6Gi
+  shmSize: 512Mi
+
+persistence:
+  storageClass: ""               # Docker Desktop hostpath default
+  accessMode: ReadWriteOnce
+  sizes:
+    postgresData: 10Gi
+    bootstrapConfig: 512Mi
+    tlsCerts: 512Mi
+    userUploads: 2Gi
+    reportArtifacts: 1Gi

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  # MUST be "mcp-server": Caddy reverse-proxies /mcp* to `mcp-server:5001`.
+  name: mcp-server
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agogevx
+    app.kubernetes.io/component: mcp-server
+  ports:
+    - name: http
+      port: 5001
+      targetPort: 5001

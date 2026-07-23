@@ -1,0 +1,56 @@
+{{- /*
+PodDisruptionBudgets (backlog B5 + ha-floor-no-spof). Rendered only when
+pdb.enabled=true AND a workload's effective replica count is > 1 — a
+minAvailable:1 PDB on a single replica would block ALL voluntary disruption (the
+lone pod could never be evicted for a node drain). The api scales under ingress
+AND loadbalancer; the frontend scales under ingress AND loadbalancer-HA
+(ha-floor-no-spof Phase 2). Both are 1 under compose. pgbouncer,
+ingestion-worker, and maintenance-worker also scale to the HA floor (3 on
+multi-node) and get a PDB; pgbouncer's drops out under the external+direct
+sub-mode where no pooler runs.
+*/ -}}
+{{- if .Values.pdb.enabled }}
+{{- $apiReplicas := 1 }}
+{{- $frontendReplicas := 1 }}
+{{- if (include "agogevx.secretsFromEnv" .) }}
+{{- $apiReplicas = .Values.api.replicas }}
+{{- end }}
+{{- if (include "agogevx.secretsFromEnv" .) }}
+{{- $frontendReplicas = .Values.frontend.replicas }}
+{{- end }}
+{{- /* pgbouncer is not rendered under external+direct (the app dials the DB), so
+       its PDB would select zero pods — force it to 1 there to skip the PDB. */ -}}
+{{- $pgbouncerReplicas := .Values.pgbouncer.replicas }}
+{{- if and .Values.postgres.external.enabled (eq .Values.db.route "direct") }}
+{{- $pgbouncerReplicas = 1 }}
+{{- end }}
+{{- $workloads := list
+  (dict "component" "api"                  "replicas" $apiReplicas)
+  (dict "component" "frontend"             "replicas" $frontendReplicas)
+  (dict "component" "pgbouncer"            "replicas" $pgbouncerReplicas)
+  (dict "component" "ingestion-worker"     "replicas" .Values.ingestion.replicas)
+  (dict "component" "matcher-worker"       "replicas" .Values.matcher.replicas)
+  (dict "component" "report-worker"        "replicas" .Values.report.replicas)
+  (dict "component" "bte-recompute-worker" "replicas" .Values.bte.replicas)
+  (dict "component" "audit-forward-worker" "replicas" .Values.auditForward.replicas)
+  (dict "component" "maintenance-worker"   "replicas" .Values.maintenance.replicas)
+-}}
+{{- range $w := $workloads }}
+{{- if gt (int $w.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $w.component }}
+  labels:
+    {{- include "agogevx.commonLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $w.component }}
+spec:
+  minAvailable: {{ $.Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: {{ $w.component }}
+{{- end }}
+{{- end }}
+{{- end }}

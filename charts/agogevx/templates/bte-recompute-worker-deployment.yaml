@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bte-recompute-worker
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bte-recompute-worker
+spec:
+  replicas: {{ .Values.bte.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: bte-recompute-worker
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bte-recompute-worker
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread (HA floor) — keep the drain replicas on different nodes so
+      # a node loss can't pause all CVSS-BTE recompute. ScheduleAnyway never blocks
+      # scheduling.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: bte-recompute-worker
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: bte-recompute-worker
+          image: {{ include "agogevx.image" (list . .Values.image.names.bte) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.bte.dbPoolSize | quote }}
+            - name: DB_MAX_OVERFLOW
+              value: {{ .Values.bte.dbMaxOverflow | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # Fully read-only root filesystem: this worker writes only to Postgres
+          # (no os.TempDir/CreateTemp use — code-audited), so it mounts NO writable
+          # volume and needs no /tmp scratch. That leaves zero writable-executable
+          # surface. If a future change needs a temp file, add a `tmp` emptyDir +
+          # mountPath:/tmp (see report-worker) — do not weaken this default silently.
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" false) }}
+          # External direct (sub-mode B): the app pool dials the external DB over
+          # TLS, so this pod mounts the CA read-only. (Pooled mode reaches it via pgbouncer.)
+          volumeMounts:
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}

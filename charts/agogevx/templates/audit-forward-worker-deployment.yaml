@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-forward-worker
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: audit-forward-worker
+spec:
+  replicas: {{ .Values.auditForward.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: audit-forward-worker
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: audit-forward-worker
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread (HA floor) — keep the drain replicas on different nodes so
+      # a node loss can't pause SIEM/Seq audit forwarding. ScheduleAnyway never
+      # blocks scheduling.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: audit-forward-worker
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: audit-forward-worker
+          image: {{ include "agogevx.image" (list . .Values.image.names.auditForward) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            {{- include "agogevx.bootstrapKeyEnv" . | nindent 12 }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.auditForward.dbPoolSize | quote }}
+            - name: AGOGEVX_VERSION
+              value: {{ .Values.image.version | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # Fully read-only root filesystem: this worker writes only to Postgres,
+          # the SIEM/Seq network socket, and (compose mode) a read-only bootstrap
+          # volume — no os.TempDir/CreateTemp use (code-audited), so no writable
+          # volume and no /tmp scratch. That leaves zero writable-executable
+          # surface. If a future change needs a temp file, add a `tmp` emptyDir +
+          # mountPath:/tmp (see report-worker) — do not weaken this default silently.
+{{- if or (include "agogevx.isCompose" .) (include "agogevx.dbCaNeeded" (dict "root" . "direct" false)) }}
+          volumeMounts:
+{{- if (include "agogevx.isCompose" .) }}
+            # Compose mode: read-only bootstrap.key + bootstrap.json so this worker
+            # can decrypt the Seq API key (and other integration_secrets) it forwards
+            # under. Under ingress/loadbalancer it decrypts via the BOOTSTRAP_KEY env
+            # instead, so no volume is needed there. Read-only preserves the
+            # zero-writable-volume posture above.
+            - name: bootstrap-config
+              mountPath: /app/instance
+              readOnly: true
+{{- end }}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" false) }}
+            # External direct (sub-mode B): the app pool dials the external DB over
+            # TLS, so this pod mounts the CA read-only. (Pooled mode reaches it via pgbouncer.)
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+{{- end }}
+      volumes:
+{{- if (include "agogevx.isCompose" .) }}
+        - name: bootstrap-config
+          persistentVolumeClaim:
+            claimName: bootstrap-config
+{{- end }}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" false) }}
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}
+{{- end }}

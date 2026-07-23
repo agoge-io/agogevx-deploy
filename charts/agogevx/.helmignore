@@ -1,0 +1,11 @@
+# Patterns to ignore when building the packaged chart (`helm package`).
+.git/
+.gitignore
+*.tmp
+*.bak
+*.orig
+*~
+.DS_Store
+# Local override values an operator may drop beside the chart — never package.
+values-local.yaml
+secrets*.yaml

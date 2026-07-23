@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maintenance-worker
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-worker
+spec:
+  # Single replica is sufficient — each scheduler self-arbitrates across
+  # replicas via pg_try_advisory_*lock, so >1 is safe but only adds lock churn.
+  replicas: {{ .Values.maintenance.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: maintenance-worker
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: maintenance-worker
+        {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.maintenance }}
+        x.com/envoy-egress-sidecar-inject: "true"
+        {{- end }}
+      {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.maintenance }}
+      annotations:
+        x.com/envoy-egress-secret-name: {{ .Values.egress.secretName | quote }}
+      {{- end }}
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+      # Compose mode: bootstrap-config is RWO, so co-locate with api. Under
+      # ingress/loadbalancer the bootstrap volume is dropped (secrets come via
+      # BOOTSTRAP_KEY env) so the worker spreads freely.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agogevx
+                  app.kubernetes.io/component: api
+              topologyKey: kubernetes.io/hostname
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: maintenance-worker
+          image: {{ include "agogevx.image" (list . .Values.image.names.maintenance) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.maintenance }}
+            {{- include "agogevx.egressProxyEnv" . | nindent 12 }}
+            {{- end }}
+            {{- include "agogevx.bootstrapKeyEnv" . | nindent 12 }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.maintenance.dbPoolSize | quote }}
+            - name: BOOTSTRAP_INSTANCE_DIR
+              value: /app/instance
+            # Backup-to-storage failure emails (S3 backend only; no-op on fs).
+            - name: FRONTEND_URL
+              value: {{ printf "https://%s" .Values.domain | quote }}
+          resources:
+            {{- include "agogevx.componentResources" (dict "root" . "component" .Values.maintenance) | nindent 12 }}
+          volumeMounts:
+            # Read-only root FS: /tmp is the only writable path outside the
+            # mounted bootstrap volume — the object-storage backup loop streams
+            # a pg_dump to a temp archive via os.CreateTemp (os.TempDir = /tmp).
+            - name: tmp
+              mountPath: /tmp
+{{- if (include "agogevx.isCompose" .) }}
+            # Compose mode: bootstrap.json (db-backup secrets) read from the
+            # shared RWO volume. Under ingress the worker decrypts via
+            # BOOTSTRAP_KEY env, so it needs no bootstrap volume.
+            - name: bootstrap-config
+              mountPath: /app/instance
+              readOnly: true
+{{- end }}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+            # External DB: CA for the direct-to-external TLS connection. Like
+            # api + ingestion-worker, this pod ALWAYS dials direct (bypassing
+            # pgbouncer) — advisory-index CONCURRENTLY matview refresh, housekeeping
+            # advisory locks, and the daily fleet-rollup scan all use directpg — so
+            # the CA is mounted in pooled mode too, not only direct sub-mode.
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+        - name: bootstrap-config
+          persistentVolumeClaim:
+            claimName: bootstrap-config
+{{- end }}

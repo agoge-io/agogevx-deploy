@@ -1,0 +1,178 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+{{- if or .Values.ingress.enabled (include "agogevx.isLoadBalancer" .) }}
+  # Multi-node (ingress OR loadbalancer-HA): the frontend scales to N stateless
+  # replicas across nodes. Under ingress, nginx + cert-manager terminate TLS; under
+  # loadbalancer-HA (ha-floor-no-spof Phase 2) every pod serves the api-published
+  # cert from the mounted Secret. RollingUpdate keeps the SPA edge up during a
+  # `helm upgrade` (Recreate would take it fully offline).
+  replicas: {{ .Values.frontend.replicas }}
+  strategy:
+    type: RollingUpdate
+{{- else }}
+  # Pinned to 1 under compose: the api pushes Caddy config to a single pod's admin
+  # API (http://frontend:2019) and the tls-certs PVC is RWO. Multi-replica frontend
+  # needs ingress or loadbalancer mode (see README "Scaling / multi-node").
+  replicas: 1
+  strategy:
+    type: Recreate
+{{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if or .Values.ingress.enabled (include "agogevx.isLoadBalancer" .) }}
+      # Soft node spread — prefer one frontend pod per node so a single node loss
+      # can't take the SPA fully offline. ScheduleAnyway never blocks scheduling
+      # (e.g. a 2-node cluster with 3 replicas still schedules). A PodDisruptionBudget
+      # (pdb.enabled) protects voluntary disruption.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: frontend
+{{- else if (include "agogevx.isCompose" .) }}
+      # Compose mode: tls-certs is RWO and shared (api writes, frontend reads), so
+      # the frontend must co-locate with api. In loadbalancer mode the frontend
+      # OWNS tls-certs (api never mounts it) and runs at 1 replica, so no affinity
+      # is needed — it schedules anywhere and attaches its RWO volume there.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agogevx
+                  app.kubernetes.io/component: api
+              topologyKey: kubernetes.io/hostname
+{{- end }}
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 101
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+        # restricted-grade seccomp. NOTE: the frontend container still keeps
+        # allowPrivilegeEscalation:true (below) for Caddy's file-capability port
+        # bind, so this pod meets `baseline` but not `restricted` — see
+        # deploy/k8s/agogevx-namespace-psa.yaml.
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: {{ include "agogevx.image" (list . .Values.image.names.frontend) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+{{- if .Values.ingress.enabled }}
+          # Run Caddy directly against the HTTP-only ConfigMap, bypassing the
+          # image's caddy-init entrypoint — which waits 60s for a bootstrap cert
+          # the api no longer writes under ingress (it would CrashLoop).
+          command: ["/usr/local/bin/caddy", "run", "--adapter", "caddyfile", "--config", "/etc/caddy-http/Caddyfile"]
+{{- end }}
+          securityContext:
+            runAsNonRoot: true
+            # Caddy binds 80/443 as the non-root UID via a file capability set
+            # on the binary (setcap in the image). allowPrivilegeEscalation must
+            # stay true for the file capability to take effect on exec.
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+          env:
+            - name: DOMAIN
+              value: {{ .Values.domain | quote }}
+{{- if (include "agogevx.isLoadBalancer" .) }}
+            # loadbalancer-HA (ha-floor-no-spof Phase 2): caddy-init runs
+            # Caddyfile.loadbalancer-ha — serve the api-published cert from the
+            # mounted Secret and proxy the :80 ACME-challenge path to the api.
+            - name: FRONTEND_TLS_MODE
+              value: "loadbalancer-ha"
+{{- end }}
+          ports:
+            - name: http
+              containerPort: 80
+{{- if not .Values.ingress.enabled }}
+            - name: https
+              containerPort: 443
+{{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+            # Caddy admin API — compose only, where the api hot-pushes config to a
+            # single frontend pod. loadbalancer-HA + ingress keep `admin off`.
+            - name: admin
+              containerPort: 2019
+{{- end }}
+          # The probe is a TCP connect to 127.0.0.1:80 (/usr/local/bin/probe);
+          # Caddy listens on :80 in both modes. Under compose, caddy-init waits
+          # for the api to write the bootstrap cert, so the pod may restart a few
+          # times on first install — the startup window tolerates it.
+          startupProbe:
+            exec:
+              command: ["/usr/local/bin/probe"]
+            periodSeconds: 5
+            failureThreshold: 40
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/probe"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/probe"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+{{- if .Values.ingress.enabled }}
+            # HTTP-only Caddyfile from the chart ConfigMap. Mounted at its own
+            # dir (NOT /etc/caddy) so it never shadows the image's baked configs.
+            - name: caddy-http
+              mountPath: /etc/caddy-http
+              readOnly: true
+{{- else if (include "agogevx.isLoadBalancer" .) }}
+            # loadbalancer-HA: the api-published kubernetes.io/tls Secret. Caddy
+            # serves tls.crt / tls.key from here (Caddyfile.loadbalancer-ha).
+            - name: frontend-tls
+              mountPath: /etc/frontend-tls
+              readOnly: true
+{{- else }}
+            # Reads the bootstrap + LE certs the api writes here.
+            - name: tls-certs
+              mountPath: /data/certs
+{{- end }}
+      volumes:
+{{- if .Values.ingress.enabled }}
+        - name: caddy-http
+          configMap:
+            name: frontend-caddy-http
+{{- else if (include "agogevx.isLoadBalancer" .) }}
+        - name: frontend-tls
+          secret:
+            secretName: {{ .Values.frontend.tlsSecret | default "agogevx-frontend-tls" }}
+{{- else }}
+        - name: tls-certs
+          persistentVolumeClaim:
+            claimName: tls-certs
+{{- end }}

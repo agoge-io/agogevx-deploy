@@ -1,0 +1,52 @@
+# =============================================================================
+# Multi-node ingress overrides (backlog B1 — multi-node TLS).
+#
+#   helm upgrade --install agogevx ./deploy/helm/agogevx \
+#     -f deploy/helm/agogevx/values-ingress.yaml \
+#     --set postgres.password=... \
+#     -n agogevx --create-namespace
+#
+# Cluster prerequisites (once per cluster, created out of band — see
+# docs/internal_documentation/kubernetes-deployment.md):
+#   - nginx-ingress installed (an IngressClass named "nginx")
+#   - cert-manager installed (CRDs + controller)
+#   - a Secret holding the DNS provider's API token (NEVER in git)
+#   - a ClusterIssuer with a dns01 solver referencing that Secret
+#   - a real FQDN whose DNS zone the provider controls
+# =============================================================================
+
+deployMode: ingress
+
+# Real public hostname (must match ingress.host). Under ingress this is only the
+# DOMAIN env on the frontend (inert — the HTTP-only Caddy listens on :80); the
+# api's app_url is captured by the setup wizard from the browser origin.
+domain: valex.example.com
+
+frontend:
+  replicas: 3
+
+ingress:
+  enabled: true
+  className: nginx
+  host: valex.example.com
+  tls:
+    secretName: agogevx-tls
+  annotations:
+    # Names a pre-created ClusterIssuer whose dns01 solver holds the DNS
+    # provider credential (Secret created out of band — never in git).
+    cert-manager.io/cluster-issuer: letsencrypt-dns01
+    # REQUIRED for the DB import/export routes — nginx's defaults (1m body,
+    # 60s timeout, buffering on) would otherwise 413 / cut them off before
+    # Caddy's 16 GB / 1800s limits apply. proxy-body-size 0 defers to Caddy.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+
+certManager:
+  issuerRef:
+    name: letsencrypt-dns01
+    kind: ClusterIssuer
+  # Leave false for a single FQDN (ingress-shim handles it). Set true only for a
+  # wildcard cert.
+  renderCertificate: false

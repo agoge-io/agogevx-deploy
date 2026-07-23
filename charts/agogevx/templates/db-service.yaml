@@ -1,0 +1,21 @@
+{{- /* External DB: the in-cluster Postgres Service is not deployed. */ -}}
+{{- if not .Values.postgres.external.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  # MUST be "db": the api/workers default DATABASE_URL host is `db`.
+  name: db
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: db
+spec:
+  # Headless — gives the StatefulSet pod stable DNS at `db`.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: agogevx
+    app.kubernetes.io/component: db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+{{- end }}

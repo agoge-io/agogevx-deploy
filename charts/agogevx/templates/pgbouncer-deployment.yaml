@@ -1,0 +1,196 @@
+{{- /* External direct (sub-mode B): the app dials the external DB itself, so
+       there is no in-cluster pooler — pgbouncer is not rendered. It IS rendered
+       for internal (either route) and for external pooled (sub-mode A). */ -}}
+{{- if not (and .Values.postgres.external.enabled (eq .Values.db.route "direct")) }}
+{{- $external := .Values.postgres.external.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgbouncer
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: pgbouncer
+spec:
+  # HA floor (ha-floor-no-spof). pgbouncer is on the request path — every app
+  # query dials it — so a single replica is a whole-stack SPOF. Multi-node values
+  # raise this to 3 (different nodes, see topologySpread below). RollingUpdate so a
+  # helm upgrade never drops all poolers at once. Compose keeps the values default
+  # of 1 (a single host can't survive its own failure).
+  replicas: {{ .Values.pgbouncer.replicas }}
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: pgbouncer
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: pgbouncer
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if and (include "agogevx.isCompose" .) (not $external) }}
+      # Compose mode (in-cluster DB): the password file lives on the RWO
+      # bootstrap-config volume the api writes, so co-locate with api. Under
+      # ingress/loadbalancer the password is mounted from the agogevx-secrets
+      # Secret instead. In external mode there is no api-written password file
+      # at all (static userlist), so co-location is never needed.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agogevx
+                  app.kubernetes.io/component: api
+              topologyKey: kubernetes.io/hostname
+{{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread — prefer one pgbouncer pod per node so a single node
+      # loss can't drop all DB connectivity for the stack. ScheduleAnyway never
+      # blocks scheduling (a 2-node cluster with 3 replicas still schedules); a
+      # PodDisruptionBudget (pdb.enabled) protects voluntary drains.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: pgbouncer
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: pgbouncer
+          image: {{ include "agogevx.image" (list . .Values.image.names.pgbouncer) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Not the shared agogevx.containerSecurityContext helper: that sets
+          # readOnlyRootFilesystem, but the edoburu entrypoint writes
+          # pgbouncer.ini / userlist.txt to /etc/pgbouncer and a unix socket at
+          # startup. Read-only-root hardening (scratch mounts for those) is the
+          # tracked follow-up — see .trivyignore.yaml AVD-KSV-0014.
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+{{- if $external }}
+            # External pooled (sub-mode A): upstream is the managed DB over TLS,
+            # authenticated by a static userlist generated from the app creds
+            # (no superuser pgbouncer_auth role, no auth_query). See entrypoint.sh.
+            - name: DB_HOST
+              value: {{ .Values.postgres.external.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.postgres.external.port | quote }}
+            - name: DB_USER
+              value: {{ include "agogevx.dbUser" . | quote }}
+            - name: DB_NAME
+              value: {{ include "agogevx.dbName" . | quote }}
+            - name: PGBOUNCER_AUTH_MODE
+              value: "static"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agogevx.postgresSecretName" . }}
+                  key: POSTGRES_PASSWORD
+            - name: SERVER_TLS_SSLMODE
+              value: {{ .Values.postgres.external.sslMode | quote }}
+            - name: SERVER_TLS_CA_FILE
+              value: "/etc/valex/db-ca.crt"
+            # Optional stats-only login for the /admin/db-pressure dashboard
+            # (separate from the app credentials). Absent → no SHOW POOLS access.
+            - name: PGBOUNCER_STATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | default "agogevx-secrets" | quote }}
+                  key: PGBOUNCER_STATS_PASSWORD
+                  optional: true
+{{- else }}
+            # pgbouncer's UPSTREAM is always the real Postgres (db:5432),
+            # regardless of db.route (which only affects api/worker routing).
+            - name: DB_HOST
+              value: "db"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: DB_NAME
+              value: {{ .Values.postgres.database | quote }}
+{{- end }}
+            - name: LISTEN_PORT
+              value: "6432"
+            - name: AUTH_TYPE
+              value: "scram-sha-256"
+            - name: POOL_MODE
+              value: "transaction"
+            - name: DEFAULT_POOL_SIZE
+              value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
+            - name: MIN_POOL_SIZE
+              value: {{ .Values.pgbouncer.minPoolSize | quote }}
+            - name: RESERVE_POOL_SIZE
+              value: {{ .Values.pgbouncer.reservePoolSize | quote }}
+            - name: MAX_CLIENT_CONN
+              value: {{ .Values.pgbouncer.maxClientConn | quote }}
+            - name: SERVER_LIFETIME
+              value: {{ .Values.pgbouncer.serverLifetime | quote }}
+            - name: SERVER_IDLE_TIMEOUT
+              value: {{ .Values.pgbouncer.serverIdleTimeout | quote }}
+          ports:
+            - name: pgbouncer
+              containerPort: 6432
+          # The entrypoint polls up to 120s for the api-written auth password
+          # file before binding 6432 (in-cluster auth_query mode), so allow a
+          # generous startup window. External static mode binds immediately.
+          startupProbe:
+            tcpSocket:
+              port: 6432
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: 6432
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 6432
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+{{- if $external }}
+            # External pooled: the upstream CA for server_tls verify-full.
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+{{- else }}
+            # Either path provides /app/instance/pgbouncer_auth_password, which
+            # the entrypoint polls for. Compose: the RWO volume the api writes.
+            # Ingress/loadbalancer: a single key projected from the agogevx-secrets Secret.
+            - name: pgbouncer-auth
+              mountPath: /app/instance
+              readOnly: true
+{{- end }}
+      volumes:
+{{- if $external }}
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- else if (include "agogevx.isCompose" .) }}
+        - name: pgbouncer-auth
+          persistentVolumeClaim:
+            claimName: bootstrap-config
+{{- else }}
+        - name: pgbouncer-auth
+          secret:
+            secretName: {{ .Values.api.appSecretsSecret | quote }}
+            items:
+              - key: PGBOUNCER_AUTH_PASSWORD
+                path: pgbouncer_auth_password
+{{- end }}
+{{- end }}

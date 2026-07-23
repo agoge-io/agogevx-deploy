@@ -1,0 +1,272 @@
+{{- include "agogevx.validateEgress" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+{{- if (include "agogevx.secretsFromEnv" .) }}
+  # Multi-node (ingress OR loadbalancer): secrets come from the agogevx-secrets
+  # Secret (env) and config from app_settings (DB), and blobs live in S3 — the
+  # bootstrap-config volume is dropped (no RWX), so the api scales to N replicas
+  # across nodes. RollingUpdate keeps the API up during a helm upgrade. vxctl
+  # mints the full secret set at install, so all replicas read identical secrets
+  # from the very first boot — no first-boot ordering needed. See README
+  # "Scaling / multi-node".
+  replicas: {{ .Values.api.replicas }}
+  strategy:
+    type: RollingUpdate
+{{- else }}
+  # Pinned to 1 under compose mode: the api writes first-boot secrets to the RWO
+  # bootstrap-config volume and pushes Caddy config to a single frontend pod.
+  replicas: 1
+  strategy:
+    type: Recreate
+{{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+        {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.api }}
+        x.com/envoy-egress-sidecar-inject: "true"
+        {{- end }}
+      {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.api }}
+      annotations:
+        x.com/envoy-egress-secret-name: {{ .Values.egress.secretName | quote }}
+      {{- end }}
+    spec:
+      serviceAccountName: agogevx
+      # LB-HA (ha-floor-no-spof Phase 2): the api PATCHes the frontend cert Secret +
+      # rolls the frontend Deployment via the in-cluster API, so it needs its SA
+      # token mounted. Scoped to those two objects by templates/api-tls-rbac.yaml.
+      # Every other mode keeps the token unmounted.
+      automountServiceAccountToken: {{ if (include "agogevx.isLoadBalancer" .) }}true{{ else }}false{{ end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread — prefer one api pod per node so a single node loss
+      # can't drop all api capacity. ScheduleAnyway never blocks scheduling (a
+      # 2-node cluster with 3 replicas still schedules). A PodDisruptionBudget
+      # (pdb.enabled) protects voluntary disruption.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: api
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "agogevx.image" (list . .Values.image.names.api) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.api }}
+            {{- include "agogevx.egressProxyEnv" . | nindent 12 }}
+            {{- end }}
+            # Deployed release tag = the image tag this chart pulls, so the
+            # System console (/health/version) reports the version actually
+            # running. Single source of truth: image.version in values.yaml.
+            - name: AGOGEVX_VERSION
+              value: {{ .Values.image.version | quote }}
+            # GHCR org that owns the images — pre-fills the "Organization" field
+            # on the opt-in Software Updates check (Application Settings).
+            - name: AGOGEVX_GHCR_ORG
+              value: {{ .Values.image.org | quote }}
+            - name: DOMAIN
+              value: {{ .Values.domain | quote }}
+            - name: API_BIND
+              value: ":5000"
+            # Deployment-mode selector. "ingress" (cert-manager) and
+            # "loadbalancer" (frontend Caddy self-ACME) both gate off the api's TLS
+            # boot actions (bootstrap-cert, lego renewal cron, Caddy admin push) and
+            # lock the in-app /api/v1/tls/* mutation routes. Unset/"compose" =
+            # single-node behaviour (the api manages TLS).
+            - name: DEPLOY_MODE
+              value: {{ .Values.deployMode | default "compose" | quote }}
+{{- if (include "agogevx.isLoadBalancer" .) }}
+            # LB-HA TLS issuance targets (ha-floor-no-spof Phase 2): the api obtains
+            # the LE cert via HTTP-01 and publishes it into this Secret, then rolls
+            # the frontend Deployment so its pods serve the real cert.
+            - name: FRONTEND_TLS_SECRET
+              value: {{ .Values.frontend.tlsSecret | default "agogevx-frontend-tls" | quote }}
+            - name: FRONTEND_DEPLOYMENT
+              value: "frontend"
+            - name: ACME_EMAIL
+              value: {{ .Values.frontend.acmeEmail | default "" | quote }}
+            - name: ACME_STAGING
+              value: {{ .Values.frontend.acmeStaging | default false | quote }}
+{{- end }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.api.dbPoolSize | quote }}
+            - name: UPLOAD_FOLDER
+              value: /app/instance/user_uploads/avatars
+            - name: EVIDENCE_UPLOAD_FOLDER
+              value: /app/instance/user_uploads/locker
+            - name: DR_EVIDENCE_ROOT
+              value: /app/instance/user_uploads/dr
+            - name: REPORT_ARTIFACT_ROOT
+              value: /app/report_artifacts
+{{- if .Values.api.appSecretsSecret }}
+            # First-boot crypto secrets, when supplied out-of-band in the named
+            # Secret (created by `vxctl`, never committed to git/values). The
+            # api reads env over bootstrap.json, so these win when present.
+            # optional:true → a missing Secret is fine: the api then self-generates
+            # them onto the bootstrap volume via the setup wizard, exactly as today.
+            # Only the api uses these (report-/ingestion-workers do not), so they
+            # are injected here only — no api/worker split-brain.
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: SECRET_KEY
+                  optional: true
+            - name: API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: API_KEY_PEPPER
+                  optional: true
+            - name: AGENT_TOKEN_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: AGENT_TOKEN_PEPPER
+                  optional: true
+            - name: MFA_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: MFA_ENCRYPTION_KEY
+                  optional: true
+            # Fernet master key — secretsvc decrypts integration_secrets with it
+            # instead of reading bootstrap.key off the volume. Safe in both modes
+            # (env wins; compose still mounts the volume for the pgbouncer file).
+            - name: BOOTSTRAP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: BOOTSTRAP_KEY
+                  optional: true
+{{- if (include "agogevx.secretsFromEnv" .) }}
+            # Multi-node (ingress/loadbalancer): the api aligns the Postgres role to
+            # this injected password and does NOT write the file (pgbouncer reads it
+            # from the Secret). Under compose the api generates + writes the file
+            # instead, which the compose-mode pgbouncer mounts off the shared volume.
+            - name: PGBOUNCER_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: PGBOUNCER_AUTH_PASSWORD
+                  optional: true
+{{- end }}
+{{- end }}
+          ports:
+            - name: http
+              containerPort: 5000
+          # Migrations run at boot (goose) — allow generous startup time.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 5000
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 5000
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 5000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            {{- include "agogevx.componentResources" (dict "root" . "component" .Values.api) | nindent 12 }}
+          volumeMounts:
+            # Read-only root FS: /tmp is the only writable path the api needs
+            # outside its mounted volumes — TLS status files, the lego
+            # writability probe (/tmp/lego-test), DB-backup temp archives, and
+            # multipart upload spill. emptyDir so the root FS stays read-only.
+            - name: tmp
+              mountPath: /tmp
+{{- if (include "agogevx.isCompose" .) }}
+            # Compose mode only. Multi-node (ingress/loadbalancer) sources secrets +
+            # the Fernet key + pgbouncer password from env (agogevx-secrets), so the
+            # bootstrap_config volume is dropped — the last RWX-needing volume.
+            # Compose keeps it: the api writes bootstrap.json / bootstrap.key / the
+            # pgbouncer password to it on the shared volume.
+            - name: bootstrap-config
+              mountPath: /app/instance
+{{- end }}
+{{- if eq (.Values.persistence.blobVolumeKind | default "pvc") "pvc" }}
+            # Shared blob PVCs (single-node default, or RWX in the all-RWX
+            # fallback). Under the S3 multi-node default (blobVolumeKind=emptyDir)
+            # these mounts are DROPPED so the api carries no RWO blob volume and
+            # can scale across nodes: blobs are served from the S3 bucket, and the
+            # unused fs-fallback paths write to the pod's ephemeral storage (no
+            # /app/instance volume under ingress). Configure object storage BEFORE
+            # scaling past 1, or those fs writes are per-pod and 404 cross-pod.
+            - name: user-uploads
+              mountPath: /app/instance/user_uploads
+            - name: report-artifacts
+              mountPath: /app/report_artifacts
+              readOnly: true
+{{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+            # Compose mode only. When the api does not manage TLS — ingress
+            # (cert-manager) or loadbalancer (the frontend Caddy self-ACMEs) —
+            # bootstrapcertsvc.Ensure + lego are gated off and the api writes no
+            # certs, so this mount is dropped (the frontend owns tls-certs in
+            # loadbalancer; nobody mounts it under ingress).
+            - name: tls-certs
+              mountPath: /app/tls
+{{- end }}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+            # External DB: CA for the direct-to-external TLS connection (boot
+            # migrations, advisory locks, CONCURRENTLY matview refresh).
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+        - name: bootstrap-config
+          persistentVolumeClaim:
+            claimName: bootstrap-config
+{{- end }}
+{{- if eq (.Values.persistence.blobVolumeKind | default "pvc") "pvc" }}
+        - name: user-uploads
+          persistentVolumeClaim:
+            claimName: user-uploads
+        - name: report-artifacts
+          persistentVolumeClaim:
+            claimName: report-artifacts
+{{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+        - name: tls-certs
+          persistentVolumeClaim:
+            claimName: tls-certs
+{{- end }}

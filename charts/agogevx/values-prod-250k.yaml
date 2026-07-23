@@ -1,0 +1,123 @@
+# =============================================================================
+# AGOGE VX — PRODUCTION tier: up to 250,000 agents (current target ceiling)
+# =============================================================================
+# A self-contained production overlay. Apply it as the ONLY -f file — it already
+# carries the multi-node HA settings (you do NOT also need values-multinode.yaml).
+#
+# Cluster sizing (production sizing matrix)
+#   Kubernetes nodes ........ 5 × (min 8 vCPU / 32 GB RAM)
+#   Dedicated Postgres ...... 16 vCPU / 64 GB / NVMe  (EXTERNAL — not in-cluster)
+#   Steady-state load ....... ~2.9–11.6 req/s (250k agents, 6–24 h check-in cadence)
+#   NOTE: 250k is being validated on the alpha K8s cluster — treat as the target
+#   ceiling and watch the match_jobs backlog + PgBouncer client-wait under load.
+#   At 250k, host_vulnerabilities is ~17.5 GB; the 64 GB DB's shared_buffers must
+#   cache the hot table (the 32 GB tier cannot, and pegs DB CPU under matcher writes).
+#
+# Component replicas (HA floor 3 everywhere; matcher is the throughput knob)
+#   matcher-worker .......... 25       pgbouncer ............... 3
+#   api ..................... 3        frontend ................ 3
+#   ingestion-worker ........ 3        report-worker ........... 3
+#   maintenance-worker ...... 3        bte-recompute-worker .... 3
+#   audit-forward-worker .... 3
+#
+# Connection budget (db.route=pgbouncer → every app pool dials the 3 in-cluster
+# poolers, which front the dedicated Postgres). Size the DB's max_connections:
+#   through-pgbouncer client demand ...... 305
+#       api 3×10=30  bte 3×8=24  ingestion 3×5=15  maintenance 3×4=12
+#       report 3×4=12  audit 3×4=12  matcher 25×8=200
+#   relay cap (3 × defaultPoolSize 150) ... 450   (1.48× demand — headroom)
+#   matcher cache pool (DIRECT, 25×2) .....  50   (bypasses pgbouncer, hits DB direct)
+#   → set the dedicated Postgres  max_connections ≥ 600
+#
+# Install (loadbalancer profile — cloud LB + frontend Caddy self-ACME; no
+# nginx-ingress, no cert-manager):
+#   1. Provision the dedicated Postgres, then create its two Secrets:
+#        kubectl -n agogevx create secret generic agogevx-db-ca --from-file=ca.crt=./db-ca.crt
+#        kubectl -n agogevx create secret generic agogevx-postgres \
+#          --from-literal=POSTGRES_PASSWORD=<app-db-password>
+#      (vxctl also mints agogevx-secrets for the api crypto material.)
+#   2. Set postgres.external.host below to the DB's FQDN (never an IP — TLS SAN).
+#   3. Configure object storage (System → Storage → private S3 bucket) on first
+#      boot BEFORE scaling traffic — blobVolumeKind=emptyDir keeps no shared volume.
+#   4. helm upgrade --install agogevx ./agogevx \
+#        -f agogevx/values-prod-250k.yaml --set domain=valex.example.com \
+#        -n agogevx --create-namespace
+#   5. Point the domain's DNS at the frontend LoadBalancer's external IP.
+#
+# To run behind an EXISTING nginx-ingress + cert-manager instead, layer
+# values-ingress.yaml AFTER this file (it flips deployMode + ingress.enabled).
+# =============================================================================
+
+deployMode: loadbalancer
+
+# Real public FQDN (never an IP — IP-SAN self-signed certs break browser TLS).
+# Override at install with --set domain=...
+domain: valex.example.com
+
+# --- Dedicated (external) Postgres -------------------------------------------
+# The in-cluster db StatefulSet / postgres-data PVC / db Service are NOT rendered.
+# Both the app pools and the in-cluster PgBouncer dial this DB over TLS.
+postgres:
+  external:
+    enabled: true
+    host: ""                  # REQUIRED — the dedicated Postgres FQDN
+    port: 5432
+    database: vulndb          # may differ on a managed DB (e.g. defaultdb)
+    user: vulndb              # may differ (e.g. doadmin)
+    sslMode: verify-full
+    caCertSecret: agogevx-db-ca # Secret with key ca.crt
+
+# Pool the whole stack through the 3 in-cluster PgBouncers (required past ~10k agents).
+db:
+  route: pgbouncer
+
+# --- PgBouncer (transaction-mode pool) ---------------------------------------
+pgbouncer:
+  replicas: 3
+  # Relay cap = replicas × defaultPoolSize = 450 upstream slots (1.48× the 305
+  # demand). This is the first tier where the 100-default relay cap (300) is below
+  # demand, so defaultPoolSize is raised. Raise the dedicated Postgres
+  # max_connections (≥ 600) BEFORE applying — verify it accepts the 450 upstream.
+  defaultPoolSize: 150
+
+# --- HA floor: 3 replicas of every stateless component -----------------------
+api:
+  replicas: 3
+frontend:
+  replicas: 3
+  serviceType: LoadBalancer
+ingestion:
+  replicas: 3
+report:
+  replicas: 3
+maintenance:
+  replicas: 3
+bte:
+  replicas: 3
+auditForward:
+  replicas: 3
+
+# --- Matcher: the throughput knob (25 at this tier) --------------------------
+# Each pod requests==limits 3Gi (chart default — the memory-heaviest worker).
+# With soft topology spread that is ~5 matchers × 3Gi (~15Gi) per node across the
+# 5 nodes — comfortable on the 32 GB nodes. If the match_jobs queue still grows
+# under burst, scale matcher.replicas up (30+) and raise pgbouncer.defaultPoolSize
+# + the DB max_connections in lockstep. (Operators wanting a tainted matcher-only
+# node pool can set matcher.nodeSelector / matcher.tolerations — see values.yaml.)
+matcher:
+  replicas: 25
+
+# --- Storage: blobs in S3, no shared volume (api/report-worker scale freely) --
+persistence:
+  blobVolumeKind: emptyDir
+
+# --- Multi-node hardening ----------------------------------------------------
+pdb:
+  enabled: true
+  minAvailable: 1
+topologySpread:
+  enabled: true
+# Default-deny ingress + explicit allows; egress stays open (external DB, ACME,
+# GHCR). No-op on a CNI that does not enforce NetworkPolicy.
+networkPolicy:
+  enabled: true

@@ -1,0 +1,24 @@
+{{- if and .Values.ingress.enabled .Values.certManager.renderCertificate }}
+{{- /*
+Explicit cert-manager Certificate. Optional — only rendered when
+certManager.renderCertificate=true. Needed for a WILDCARD cert; for a single
+FQDN the ingress-shim (cert-manager.io/cluster-issuer annotation on the Ingress)
+is enough and this can stay off. The referenced issuer + its DNS-01 solver
+credential Secret are created out of band by the operator — never in this chart.
+*/ -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agogevx-tls
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  secretName: {{ .Values.ingress.tls.secretName }}
+  dnsNames:
+    - {{ required "ingress.host must be set when rendering a Certificate" .Values.ingress.host | quote }}
+  issuerRef:
+    name: {{ required "certManager.issuerRef.name must be set when certManager.renderCertificate=true" .Values.certManager.issuerRef.name }}
+    kind: {{ .Values.certManager.issuerRef.kind }}
+    group: cert-manager.io
+{{- end }}

@@ -1,0 +1,42 @@
+{{- if .Values.ingress.enabled }}
+{{- /*
+nginx Ingress — TLS termination + a single backend (the frontend Caddy on :80),
+which keeps all routing/headers/timeouts. cert-manager fills ingress.tls.secretName
+either via the ingress-shim (cert-manager.io/cluster-issuer annotation) or the
+optional explicit Certificate (certManager.renderCertificate). ingress.host MUST be
+a real FQDN — never an IP SAN.
+
+The proxy-body-size / proxy-read-timeout / proxy-send-timeout / proxy-buffering
+annotations (set in values-ingress.yaml) are REQUIRED for the DB import/export
+routes: nginx's defaults (1m body, 60s timeout, buffering on) would 413/cut them
+off before Caddy's 16 GB / 1800s limits apply.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agogevx
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ required "ingress.host must be a real FQDN (never an IP) when ingress.enabled=true" .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+{{- end }}

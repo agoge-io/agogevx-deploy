@@ -1,0 +1,67 @@
+{{- /*
+PersistentVolumeClaims for all AGOGE VX state.
+
+postgres-data is always ReadWriteOnce (single writer). bootstrap-config holds the
+first-boot secrets + config files in compose mode; under ingress (multi-node) it
+is NOT provisioned at all — secrets come from the agogevx-secrets Secret and config
+from app_settings (DB), so NO ReadWriteMany class is needed anywhere. Blob volumes
+(user-uploads, report-artifacts) are provisioned ONLY when
+persistence.blobVolumeKind=pvc; under the S3 multi-node default
+(blobVolumeKind=emptyDir) blobs live in object storage and no shared blob PVC is
+created. The retired uct-repo volume is gone (the Go ubuntu_uct worker clones into
+its temp dir; matches the docker-compose removal).
+
+Per-volume accessMode/storageClass come from persistence.volumes.<key>, falling
+back to the global persistence.accessMode / persistence.storageClass.
+*/ -}}
+{{- $g := .Values.persistence -}}
+{{- /* postgres-data is only provisioned for the in-cluster DB. With an external
+       (managed) Postgres it is NOT created — but the other PVCs below still are.
+       Gate ONLY this entry, never the whole template. */ -}}
+{{- $vols := list -}}
+{{- if not .Values.postgres.external.enabled -}}
+{{- $vols = append $vols (dict "name" "postgres-data" "size" $g.sizes.postgresData "key" "postgresData") -}}
+{{- end -}}
+{{- /* bootstrap-config holds the secret/config files + the pgbouncer password.
+       Only compose mode uses it. Under ingress AND loadbalancer those are sourced
+       from env / the agogevx-secrets Secret, so no bootstrap-config PVC is
+       provisioned — it is the last RWX-needing volume, and dropping it is what
+       makes multi-node need only RWO + S3. */ -}}
+{{- if (include "agogevx.isCompose" .) }}
+{{- $vols = append $vols (dict "name" "bootstrap-config" "size" $g.sizes.bootstrapConfig "key" "bootstrapConfig") }}
+{{- end }}
+{{- /* Blob PVCs only when not using S3/emptyDir. */ -}}
+{{- if eq ($g.blobVolumeKind | default "pvc") "pvc" }}
+{{- $vols = append $vols (dict "name" "user-uploads"     "size" $g.sizes.userUploads     "key" "userUploads") }}
+{{- $vols = append $vols (dict "name" "report-artifacts" "size" $g.sizes.reportArtifacts "key" "reportArtifacts") }}
+{{- end }}
+{{- /* tls-certs holds the cert in COMPOSE mode only: the api's lego writes it and
+       the single frontend pod reads it. Under loadbalancer-HA (ha-floor-no-spof
+       Phase 2) the api publishes the cert into the frontend-tls Secret that every
+       frontend pod mounts, and under ingress cert-manager owns the cert in a
+       Secret — so neither provisions the tls-certs PVC. */ -}}
+{{- if (include "agogevx.isCompose" .) }}
+{{- $vols = append $vols (dict "name" "tls-certs" "size" $g.sizes.tlsCerts "key" "tlsCerts") }}
+{{- end }}
+{{- range $v := $vols }}
+{{- $ov := (get ($g.volumes | default dict) $v.key) | default dict }}
+{{- $accessMode := $ov.accessMode | default $g.accessMode }}
+{{- $storageClass := $ov.storageClass | default $g.storageClass }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $v.name }}
+  labels:
+    {{- include "agogevx.commonLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - {{ $accessMode }}
+  resources:
+    requests:
+      storage: {{ $v.size }}
+  {{- if $storageClass }}
+  storageClassName: {{ $storageClass | quote }}
+  {{- end }}
+{{- end }}

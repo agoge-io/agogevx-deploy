@@ -1,0 +1,38 @@
+{{- /* External DB: the in-cluster Postgres config is not deployed. */ -}}
+{{- if not .Values.postgres.external.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+data:
+  # Mirrors docker/postgres/postgresql.conf with the include path updated to
+  # match PGDATA=/var/lib/postgresql/data/pgdata (the K8s subdirectory layout
+  # that avoids the lost+found block-device error on fresh PVCs).
+  postgresql.conf: |
+    include = '/var/lib/postgresql/data/pgdata/postgresql.conf'
+
+    listen_addresses = '*'
+
+    shared_preload_libraries = 'pg_stat_statements'
+    pg_stat_statements.max = 10000
+    pg_stat_statements.track = top
+    pg_stat_statements.track_planning = on
+
+    # Sized for the HA-floor pgbouncer budget (ha-floor-no-spof). When
+    # db.route=pgbouncer (l/xl tiers) the 3 poolers front the whole stack:
+    # 3 × defaultPoolSize(100) = 300 steady upstream conns, + reserve_pool_size
+    # burst (3×5) + ingestion's direct CONCURRENTLY/advisory-lock conns that bypass
+    # pgbouncer + superuser_reserved ≈ 320-330 worst case. 350 leaves ~20-25 headroom.
+    # Keep this ≥ pgbouncer.replicas × defaultPoolSize + ~30; an external/managed DB
+    # must offer at least the same (the floor's smallest validated managed DB is 397).
+    max_connections = 350
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    maintenance_work_mem = 1GB
+    work_mem = 16MB
+    shared_buffers = 512MB
+    statement_timeout = 30s
+    idle_in_transaction_session_timeout = 120s
+{{- end }}

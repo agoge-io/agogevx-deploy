@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matcher-worker
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: matcher-worker
+spec:
+  replicas: {{ .Values.matcher.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: matcher-worker
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: matcher-worker
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.matcher.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.matcher.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.matcher.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: matcher-worker
+          image: {{ include "agogevx.image" (list . .Values.image.names.matcher) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            - name: MATCHER_POLL_INTERVAL_MS
+              value: {{ .Values.matcher.pollIntervalMs | quote }}
+            - name: MATCHER_JOB_TIMEOUT_SECONDS
+              value: {{ .Values.matcher.jobTimeoutSeconds | quote }}
+            - name: MATCHER_MAX_RETRIES
+              value: {{ .Values.matcher.maxRetries | quote }}
+            - name: MATCHER_CONCURRENCY
+              value: {{ .Values.matcher.concurrency | quote }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.matcher.dbPoolSize | quote }}
+            - name: DB_MAX_OVERFLOW
+              value: {{ .Values.matcher.dbMaxOverflow | quote }}
+            - name: MATCHER_CACHE_DB_POOL_SIZE
+              value: {{ .Values.matcher.cacheDbPoolSize | quote }}
+          resources:
+            {{- include "agogevx.componentResources" (dict "root" . "component" .Values.matcher) | nindent 12 }}
+          # Fully read-only root filesystem: this worker writes only to Postgres
+          # (no os.TempDir/CreateTemp use — code-audited), so it mounts NO writable
+          # volume and needs no /tmp scratch. That leaves zero writable-executable
+          # surface. If a future change needs a temp file, add a `tmp` emptyDir +
+          # mountPath:/tmp (see report-worker) — do not weaken this default silently.
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+          # The dedicated AffectedProductsCache pool dials the external DB DIRECT
+          # (bypassing pgbouncer — Option B, plans/matcher-pool-deadlock-fix.md), so
+          # this pod mounts the CA read-only in external mode REGARDLESS of db.route —
+          # including pooled, where the job pool itself goes via pgbouncer. direct=true,
+          # same as report/maintenance/ingestion. Without this the cache pool's TLS dial
+          # fails with "open /etc/valex/db-ca.crt: no such file" in external+pooled mode.
+          volumeMounts:
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}

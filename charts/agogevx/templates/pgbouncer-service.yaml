@@ -1,0 +1,20 @@
+{{- /* External direct (sub-mode B): no in-cluster pooler — Service not rendered. */ -}}
+{{- if not (and .Values.postgres.external.enabled (eq .Values.db.route "direct")) }}
+apiVersion: v1
+kind: Service
+metadata:
+  # MUST be "pgbouncer": api/workers route to `pgbouncer:6432` when db.route=pgbouncer.
+  name: pgbouncer
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: pgbouncer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agogevx
+    app.kubernetes.io/component: pgbouncer
+  ports:
+    - name: pgbouncer
+      port: 6432
+      targetPort: 6432
+{{- end }}

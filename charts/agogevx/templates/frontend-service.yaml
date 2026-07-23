@@ -1,0 +1,71 @@
+{{- /*
+Frontend Services.
+
+Compose & loadbalancer topology (ingress.enabled=false):
+  - "frontend"     ClusterIP. MUST be named exactly "frontend" and expose 2019
+                   so the api can push Caddy config to http://frontend:2019
+                   (compose only; in loadbalancer mode Caddy self-ACMEs and the
+                   api never pushes, but the port is harmless). 2019 stays
+                   cluster-internal — never on the LB.
+  - "frontend-lb"  External entry for 80/443 (type = frontend.serviceType). On a
+                   cloud cluster this provisions the cloud load balancer; Caddy
+                   terminates TLS (compose: api-issued; loadbalancer: self-ACME).
+                   Docker Desktop binds LoadBalancer to localhost.
+
+Ingress topology (ingress.enabled=true):
+  - only the "frontend" ClusterIP on :80 — the Ingress backend. No runtime push
+    (drop 2019), nginx terminates TLS (drop 443), and the external entry is the
+    Ingress, not a LoadBalancer (drop frontend-lb).
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agogevx
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+{{- if not .Values.ingress.enabled }}
+    - name: admin
+      port: 2019
+      targetPort: 2019
+    - name: https
+      port: 443
+      targetPort: 443
+{{- end }}
+{{- if not .Values.ingress.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-lb
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+  {{- with .Values.frontend.lbAnnotations }}
+  # Provider-specific load-balancer tuning (e.g. DigitalOcean
+  # service.beta.kubernetes.io/do-loadbalancer-* annotations). Empty by default.
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.frontend.serviceType }}
+  selector:
+    app.kubernetes.io/name: agogevx
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443
+{{- end }}

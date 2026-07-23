@@ -1,0 +1,166 @@
+{{- if .Values.ingress.enabled }}
+{{- /*
+HTTP-only Caddyfile for the ingress topology (DEPLOY_MODE=ingress).
+
+nginx-ingress terminates TLS and proxies to this Caddy over plain HTTP, so this
+config is frontend/Caddyfile.tls with four deliberate changes:
+  * site address  https://{$DOMAIN}  ->  bare  :80   (ingress already matched host)
+  * the `tls` directive removed (no cert on disk; nginx owns TLS)
+  * the separate http://{$DOMAIN} -> https 301 redirect block removed (nginx owns it)
+  * global block: `admin off` (no runtime push under ingress; drops the 2019 surface)
+Everything else — proxies, security headers, HSTS, encode, the DB import/export
+1800s + 16 GB blocks, @buildassets cache, handle_errors, SPA catch-all — is byte
+identical to Caddyfile.tls.
+
+CADDY CONFIG HAS FIVE HOMES: when changing routes/headers, update all five —
+frontend/Caddyfile.tls, frontend/Caddyfile.selfsigned,
+frontend/Caddyfile.loadbalancer, go/internal/services/tlssvc/caddy.go, and this
+ConfigMap.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-caddy-http
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+data:
+  Caddyfile: |
+    {
+        admin off
+        auto_https off
+    }
+
+    # Ingress terminates TLS and proxies here over HTTP. No host matcher — the
+    # ingress already matched the host; listening on :80 also satisfies the pod
+    # probe (TCP connect to 127.0.0.1:80, frontend/healthcheck.go).
+    :80 {
+        # WS8 — zstd preferred (faster decode, higher ratio), gzip fallback
+        # for clients that don't advertise zstd. Caddy skips
+        # already-compressed media types automatically.
+        encode zstd gzip
+
+        # HSTS — the browser receives it over nginx's HTTPS hop, so it is valid.
+        # Single source: do NOT also enable HSTS on nginx.
+        header Strict-Transport-Security "max-age=31536000"
+
+        # Defense-in-depth security headers — applied to every response.
+        # Identical to Caddyfile.tls / Caddyfile.selfsigned and the runtime
+        # override the Go api pushes (tlssvc.BuildCaddyConfig). When changing
+        # one, change all five. img-src allows blob: for URL.createObjectURL()
+        # flows (CSV export, report download). style-src 'unsafe-inline' for
+        # Tailwind runtime styles.
+        header {
+            Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+            X-Frame-Options "DENY"
+            X-Content-Type-Options "nosniff"
+            Referrer-Policy "strict-origin-when-cross-origin"
+        }
+
+        # DB backup/restore needs 1800s timeouts on the slow streaming paths
+        # (pg_dump-style archive builds + TRUNCATE+INSERT restores still
+        # block the response stream for minutes on a populated DB). Body
+        # cap of 16 GB sized for the largest realistic intel-DB scope.
+        # NOTE: nginx-ingress is in front and its defaults (1m body, 60s
+        # timeout, buffering on) would cut these off first — the Ingress
+        # MUST set proxy-body-size/proxy-read-timeout/proxy-send-timeout/
+        # proxy-buffering (see values-ingress.yaml).
+        @db_slow path /api/v1/admin/db/import* /api/v1/admin/db/restore-jobs*
+        handle @db_slow {
+            request_body {
+                max_size 16GB
+            }
+            reverse_proxy api:5000 {
+                header_up X-Forwarded-Proto https
+                header_up X-Real-Ip {remote_host}
+                header_up X-Forwarded-For {remote_host}
+                transport http {
+                    versions 1.1
+                    read_timeout 1800s
+                    write_timeout 1800s
+                    dial_timeout 30s
+                }
+            }
+        }
+
+        handle /api/v1/admin/db/export* {
+            reverse_proxy api:5000 {
+                header_up X-Forwarded-Proto https
+                header_up X-Real-Ip {remote_host}
+                header_up X-Forwarded-For {remote_host}
+                transport http {
+                    versions 1.1
+                    read_timeout 1800s
+                    write_timeout 1800s
+                    dial_timeout 30s
+                }
+            }
+        }
+
+        # All other API routes.
+        handle /api/* {
+            reverse_proxy api:5000 {
+                header_up X-Forwarded-Proto https
+                header_up X-Real-Ip {remote_host}
+                header_up X-Forwarded-For {remote_host}
+                transport http {
+                    versions 1.1
+                }
+            }
+        }
+
+        # MCP server — read-only vulnerability-intelligence tools over streamable
+        # HTTP for external AI clients. Off unless mcp_enabled + a Business "mcp"
+        # license. flush_interval -1 disables buffering for any streamed frames.
+        @mcp path /mcp /mcp/*
+        handle @mcp {
+            reverse_proxy mcp-server:5001 {
+                header_up X-Forwarded-Proto https
+                header_up X-Real-Ip {remote_host}
+                header_up X-Forwarded-For {remote_host}
+                flush_interval -1
+                transport http {
+                    versions 1.1
+                }
+            }
+        }
+
+        # Unversioned probe paths some monitoring scripts poll. Bare /health
+        # is owned by the SPA HealthPage — monitoring should use /health/live
+        # (or /api/v1/health) instead.
+        @health path /health/live /health/ready
+        handle @health {
+            reverse_proxy api:5000
+        }
+
+        # Content-hashed build assets — long-lived immutable cache. Matched by
+        # file extension (not the bare /assets/ prefix) so SPA routes that also
+        # live under /assets/ — e.g. /assets/hosts/123 — fall through to the
+        # index.html catch-all below. A missing hashed asset (a stale cached
+        # index.html pointing at an old build) 404s here instead of being served
+        # index.html, which the browser would reject as a stylesheet/script.
+        @buildassets path /assets/*.js /assets/*.css /assets/*.map /assets/*.woff2 /assets/*.woff /assets/*.ttf /assets/*.svg /assets/*.png /assets/*.jpg /assets/*.jpeg /assets/*.gif /assets/*.webp /assets/*.avif
+        handle @buildassets {
+            root * /srv
+            header Cache-Control "public, max-age=31536000, immutable"
+            file_server
+        }
+
+        # Custom error pages.
+        handle_errors {
+            root * /srv
+            rewrite * /error-pages/{http.error.status_code}.html
+            file_server
+        }
+
+        # SPA catch-all — serve static files, fall back to index.html for
+        # React Router paths that don't match a real file. index.html is served
+        # no-cache so each deploy's new asset hashes are picked up immediately.
+        handle {
+            root * /srv
+            header Cache-Control "no-cache"
+            try_files {path} /index.html
+            file_server
+        }
+    }
+{{- end }}

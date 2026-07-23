@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: {{ .Values.mcp.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: mcp-server
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp-server
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+      # Compose mode: bootstrap-config is RWO, so co-locate with api to read
+      # bootstrap.json (API_KEY_PEPPER). Multi-node injects the pepper via env,
+      # so the server spreads freely.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agogevx
+                  app.kubernetes.io/component: api
+              topologyKey: kubernetes.io/hostname
+{{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread (HA floor) — keep the MCP replicas on different nodes so
+      # a node loss can't drop all MCP capacity. ScheduleAnyway never blocks
+      # scheduling. In compose mode the podAffinity above co-locates with api
+      # instead (RWO bootstrap volume); the two never both apply.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: mcp-server
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: mcp-server
+          image: {{ include "agogevx.image" (list . .Values.image.names.mcp) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            {{- include "agogevx.bootstrapKeyEnv" . | nindent 12 }}
+            - name: MCP_BIND
+              value: ":5001"
+            - name: DB_POOL_SIZE
+              value: {{ .Values.mcp.dbPoolSize | quote }}
+            - name: BOOTSTRAP_INSTANCE_DIR
+              value: /app/instance
+{{- if (and (include "agogevx.secretsFromEnv" .) .Values.api.appSecretsSecret) }}
+            # Multi-node (ingress/loadbalancer): the API-key pepper(s) for inbound
+            # HMAC verification come from the agogevx-secrets Secret (minted by
+            # vxctl), the same source the api uses. optional:true → a missing key
+            # is fine at render time (the server then treats the pepper as empty
+            # and rejects every key until it is present).
+            - name: API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: API_KEY_PEPPER
+                  optional: true
+            - name: API_KEY_PEPPER_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: API_KEY_PEPPER_PREVIOUS
+                  optional: true
+{{- end }}
+          ports:
+            - name: http
+              containerPort: 5001
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 5001
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 5001
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 5001
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # Read-only root FS: /tmp is the only writable path the server needs.
+            - name: tmp
+              mountPath: /tmp
+{{- if (include "agogevx.isCompose" .) }}
+            # Compose mode: API_KEY_PEPPER read from bootstrap.json on the shared
+            # RWO volume. Multi-node sources it from env (above), no volume needed.
+            - name: bootstrap-config
+              mountPath: /app/instance
+              readOnly: true
+{{- end }}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" false) }}
+            # External DB: CA for the pooled TLS connection. mcp-server dials only
+            # the pooled path (pure read tools, no directpg), so the CA is mounted
+            # for pooled mode only.
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" false) }}
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+        - name: bootstrap-config
+          persistentVolumeClaim:
+            claimName: bootstrap-config
+{{- end }}

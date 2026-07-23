@@ -1,0 +1,59 @@
+AGOGE VX has been deployed to namespace "{{ .Release.Namespace }}" (release "{{ .Release.Name }}").
+
+Images:      ghcr.io/{{ .Values.image.org }}/agogevx-*:{{ .Values.image.version }}
+DB routing:  {{ .Values.db.route }}  (api/workers -> {{ include "agogevx.dbHost" . }}:{{ include "agogevx.dbPort" . }})
+
+1. Watch the stack come up (db -> api -> pgbouncer/report -> frontend):
+
+     kubectl -n {{ .Release.Namespace }} get pods -w
+
+   On first install the frontend may restart a few times until the api writes
+   the bootstrap TLS cert to the shared tls-certs volume — this is expected.
+
+2. Confirm the api is healthy:
+
+     kubectl -n {{ .Release.Namespace }} port-forward deploy/api 5000:5000
+     curl -k http://localhost:5000/health/ready      # expect database: ok
+
+3. Reach the setup wizard:
+{{- if eq .Values.frontend.serviceType "LoadBalancer" }}
+
+     # Docker Desktop binds the LoadBalancer to localhost:
+     open https://{{ .Values.domain }}/
+
+     # If EXTERNAL-IP stays <pending> (e.g. minikube), either run
+     # `minikube tunnel` or switch frontend.serviceType to NodePort.
+     kubectl -n {{ .Release.Namespace }} get svc frontend-lb
+{{- else if eq .Values.frontend.serviceType "NodePort" }}
+
+     minikube service frontend-lb -n {{ .Release.Namespace }} --url
+     # or:
+     kubectl -n {{ .Release.Namespace }} get svc frontend-lb
+{{- else }}
+
+     kubectl -n {{ .Release.Namespace }} get svc frontend-lb
+{{- end }}
+
+   The browser will warn about the self-signed certificate — expected for the
+   "{{ .Values.domain }}" bootstrap cert.
+
+{{- $pgSecret := lookup "v1" "Secret" .Release.Namespace (include "agogevx.postgresSecretName" .) }}
+{{- if and (not .Values.postgres.existingSecret) (not .Values.postgres.password) (not $pgSecret) }}
+
+WARNING: no Postgres password found. db and api will fail to start. Provide one:
+  - run `vxctl` first (it creates the agogevx-postgres Secret in this namespace), or
+  - --set postgres.password=$(openssl rand -base64 32), or
+  - --set postgres.existingSecret=<secret-with-POSTGRES_PASSWORD>
+{{- end }}
+
+Scaling the matcher (the primary throughput knob):
+
+     helm upgrade {{ .Release.Name }} . -n {{ .Release.Namespace }} \
+       --reuse-values --set matcher.replicas=4
+
+Tearing it down (vxctl keeps your data unless you opt in):
+
+     vxctl teardown --namespace {{ .Release.Namespace }} --yes                    # helm uninstall, PVCs kept
+     vxctl teardown --namespace {{ .Release.Namespace }} --yes --delete-namespace # also deletes data
+
+Full runbook: docs/internal_documentation/kubernetes-deployment.md

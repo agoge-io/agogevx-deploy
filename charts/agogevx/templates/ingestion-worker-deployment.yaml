@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-worker
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion-worker
+spec:
+  # HA floor (ha-floor-no-spof). The scheduler is advisory-lock arbitrated
+  # (pg_try_advisory_xact_lock per source), so extra replicas are warm standbys —
+  # only one runs each sync, the others are ready to take over. Raised above 1 so a
+  # node failure can't take out ingestion scheduling. Compose keeps the values
+  # default of 1.
+  replicas: {{ .Values.ingestion.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: ingestion-worker
+  template:
+    metadata:
+      labels:
+        {{- include "agogevx.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ingestion-worker
+        {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.ingestion }}
+        x.com/envoy-egress-sidecar-inject: "true"
+        {{- end }}
+      {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.ingestion }}
+      annotations:
+        x.com/envoy-egress-secret-name: {{ .Values.egress.secretName | quote }}
+      {{- end }}
+    spec:
+      serviceAccountName: agogevx
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread — keep the warm-standby replicas on different nodes so a
+      # node loss leaves a standby ready to win the advisory lock. ScheduleAnyway
+      # never blocks scheduling.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: ingestion-worker
+{{- end }}
+      securityContext:
+        {{- include "agogevx.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: ingestion-worker
+          image: {{ include "agogevx.image" (list . .Values.image.names.ingestion) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "agogevx.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "agogevx.dbEnv" . | nindent 12 }}
+            {{- if and .Values.egress.enabled .Values.egress.httpWorkloads.ingestion }}
+            {{- include "agogevx.egressProxyEnv" . | nindent 12 }}
+            {{- end }}
+            {{- include "agogevx.bootstrapKeyEnv" . | nindent 12 }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.ingestion.dbPoolSize | quote }}
+            - name: NVD_API_KEY
+              value: {{ .Values.ingestion.nvdApiKey | quote }}
+            - name: MSRC_API_KEY
+              value: {{ .Values.ingestion.msrcApiKey | quote }}
+          resources:
+            {{- include "agogevx.componentResources" (dict "root" . "component" .Values.ingestion) | nindent 12 }}
+          volumeMounts:
+            # Read-only root FS: the ubuntu_uct source clones into os.TempDir
+            # (/tmp/valex-uct, re-cloned fresh each run — deliberately NOT the
+            # retired /var/lib/valex uct-repo volume, see ubuntuuct.go), so /tmp
+            # must be writable. emptyDir keeps the root filesystem read-only.
+            - name: tmp
+              mountPath: /tmp
+{{- if (include "agogevx.isCompose" .) }}
+            # Compose mode: read-only bootstrap.key + bootstrap.json so this worker
+            # can decrypt wizard-saved integration keys (NVD/MSRC) from the
+            # integration_secrets table. Under ingress/loadbalancer it decrypts via
+            # the BOOTSTRAP_KEY env instead, so no volume is needed there.
+            - name: bootstrap-config
+              mountPath: /app/instance
+              readOnly: true
+{{- end }}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+            # External DB: CA for the direct-to-external TLS connection (source
+            # advisory locks + CONCURRENTLY matview refresh bypass pgbouncer).
+            {{- include "agogevx.dbCaVolumeMount" . | nindent 12 }}
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if (include "agogevx.isCompose" .) }}
+        - name: bootstrap-config
+          persistentVolumeClaim:
+            claimName: bootstrap-config
+{{- end }}
+{{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
+        {{- include "agogevx.dbCaVolume" . | nindent 8 }}
+{{- end }}
