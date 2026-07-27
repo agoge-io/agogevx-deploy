@@ -13,7 +13,7 @@
 image:
   registry: ghcr.io
   org: agoge-io            # AGOGEVX_GHCR_ORG
-  version: "2.25"           # AGOGEVX_VERSION — the release tag to deploy
+  version: "2.25.1"           # AGOGEVX_VERSION — the release tag to deploy
   pullPolicy: IfNotPresent # use Never to run locally-built images on Docker Desktop
   names:
     api: agogevx-api

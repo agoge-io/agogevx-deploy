@@ -41,13 +41,16 @@ data:
         encode zstd gzip
 
         # HSTS — the browser receives it over nginx's HTTPS hop, so it is valid.
-        # Single source: do NOT also enable HSTS on nginx.
-        header Strict-Transport-Security "max-age=31536000"
+        # Single source: do NOT also enable HSTS on nginx. 1 year +
+        # includeSubDomains (IL5/STIG expectation); preload omitted.
+        header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 
         # Defense-in-depth security headers — applied to every response.
         # Identical to Caddyfile.tls / Caddyfile.selfsigned and the runtime
         # override the Go api pushes (tlssvc.BuildCaddyConfig). When changing
-        # one, change all five. img-src allows blob: for URL.createObjectURL()
+        # one, change all SIX: Caddyfile.tls, Caddyfile.selfsigned,
+        # Caddyfile.loadbalancer, Caddyfile.loadbalancer-ha, tlssvc/caddy.go, and
+        # this ConfigMap. img-src allows blob: for URL.createObjectURL()
         # flows (CSV export, report download). style-src 'unsafe-inline' for
         # Tailwind runtime styles.
         header {
@@ -55,6 +58,7 @@ data:
             X-Frame-Options "DENY"
             X-Content-Type-Options "nosniff"
             Referrer-Policy "strict-origin-when-cross-origin"
+            Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()"
         }
 
         # DB backup/restore needs 1800s timeouts on the slow streaming paths
