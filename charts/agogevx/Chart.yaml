@@ -25,7 +25,7 @@ version: 0.6.0
 
 # Default application image tag. The real tag deployed is image.version in
 # values.yaml; keep this in sync for `helm show chart` readers.
-appVersion: "2.26.3"
+appVersion: "2.26.4"
 
 home: https://github.com/agoge-io/agogevx
 sources:
