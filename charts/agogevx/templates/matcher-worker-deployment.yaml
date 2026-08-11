@@ -68,7 +68,7 @@ spec:
           # mountPath:/tmp (see report-worker) — do not weaken this default silently.
 {{- if include "agogevx.dbCaNeeded" (dict "root" . "direct" true) }}
           # The dedicated AffectedProductsCache pool dials the external DB DIRECT
-          # (bypassing pgbouncer — Option B, plans/matcher-pool-deadlock-fix.md), so
+          # (bypassing pgbouncer — Option B, plans/finished/matcher/2026-06-22-perf-scale-matcher_pool_deadlock_fix.md), so
           # this pod mounts the CA read-only in external mode REGARDLESS of db.route —
           # including pooled, where the job pool itself goes via pgbouncer. direct=true,
           # same as report/maintenance/ingestion. Without this the cache pool's TLS dial

@@ -123,8 +123,8 @@ helm uninstall agogevx -n agogevx
 The default values run single-node because every pod that shares a
 `ReadWriteOnce` PVC lands on the same node. **Multi-node is supported with only
 `ReadWriteOnce` block storage + S3 — no `ReadWriteMany` (NFS) class is required.**
-Use `values-multinode.yaml` (see `plans/k8s-bootstrap-secret-migration.md`, the
-authoritative design, plus `plans/finished/k8s-multinode-loadbalancer-portable-storage.md`).
+Use `values-multinode.yaml` (see `plans/finished/deploy/k8s/2026-06-13-deploy-k8s-bootstrap_secret_migration.md`, the
+authoritative design, plus `plans/finished/deploy/k8s/2026-06-13-deploy-k8s-multinode_loadbalancer_portable_storage.md`).
 
 **Two multi-node profiles** (pick with `deployMode`; vxctl exposes them as a
 choice):

@@ -11,7 +11,7 @@ type: application
 # 0.6.0 — enterprise egress proxy (enclave): optional `egress` block injects the
 # Kyverno Envoy-sidecar label/annotation + HTTP(S)_PROXY/NO_PROXY env onto the
 # egressing workloads (api/ingestion/report/maintenance); render-guarded to
-# deployMode: ingress. See plans/enterprise-egress-proxy-support.md.
+# deployMode: ingress. See plans/finished/deploy/infra/2026-07-07-deploy-infra-enterprise_egress_proxy_support.md.
 # 0.5.0 — give api + maintenance-worker their own resources block (base+burst:
 # api req 1Gi, maintenance req 512Mi, both limit 3Gi) via the componentResources
 # helper, so they reserve a real memory floor instead of the 128Mi global default.
@@ -25,7 +25,7 @@ version: 0.6.0
 
 # Default application image tag. The real tag deployed is image.version in
 # values.yaml; keep this in sync for `helm show chart` readers.
-appVersion: "2.26.8"
+appVersion: "2.26.9"
 
 home: https://github.com/agoge-io/agogevx
 sources:

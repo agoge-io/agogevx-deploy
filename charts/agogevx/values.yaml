@@ -13,7 +13,7 @@
 image:
   registry: ghcr.io
   org: agoge-io            # AGOGEVX_GHCR_ORG
-  version: "2.26.8"           # AGOGEVX_VERSION — the release tag to deploy
+  version: "2.26.9"           # AGOGEVX_VERSION — the release tag to deploy
   pullPolicy: IfNotPresent # use Never to run locally-built images on Docker Desktop
   names:
     api: agogevx-api
@@ -70,7 +70,7 @@ postgres:
   shmSize: 1Gi             # /dev/shm size (compose shm_size: 1g)
 
   # External / managed Postgres (DO / RDS / Cloud SQL / Azure / self-managed).
-  # See plans/finished/external-database-support.md. WRITTEN BY vxctl — do
+  # See plans/finished/platform/db/2026-06-15-platform-db-external_database_support.md. WRITTEN BY vxctl — do
   # not hand-edit. When enabled:
   #   - the in-cluster db StatefulSet + its postgres-data PVC + db Service are
   #     NOT rendered;
@@ -165,7 +165,7 @@ matcher:
   dbPoolSize: 8
   dbMaxOverflow: 0
   # Dedicated DIRECT-to-Postgres pool for the AffectedProductsCache miss-load
-  # (Option B, plans/matcher-pool-deadlock-fix.md). Separate from dbPoolSize so a
+  # (Option B, plans/finished/matcher/2026-06-22-perf-scale-matcher_pool_deadlock_fix.md). Separate from dbPoolSize so a
   # cache fill never draws a 2nd connection from the job pool a transaction already
   # holds — the pool-exhaustion deadlock is then structurally impossible regardless
   # of dbPoolSize vs concurrency. Bypasses pgbouncer (counts only against the DB
@@ -179,7 +179,7 @@ matcher:
   # The matcher is the memory-heaviest worker (full-detail hosts x concurrency).
   # Override the global `resources` default with its own 3Gi request==limit, sized
   # from the 25k ramp (a 2Gi limit OOMKilled at concurrency 4 — see
-  # plans/k8s-loadtest-capacity-sizing.md). request==limit so the scheduler reserves
+  # plans/finished/deploy/k8s/2026-06-15-deploy-k8s-loadtest_capacity_sizing.md). request==limit so the scheduler reserves
   # the worst case and packs deterministically (~4/node on s-8vcpu-16gb), and a
   # correlated spike can't overflow the node. vxctl `--node-mem-gib` overwrites
   # these via --set when sizing a specific node; pkg/memlimit derives GOMEMLIMIT
@@ -214,7 +214,7 @@ ingestion:
   dbPoolSize: 5
   nvdApiKey: ""            # optional; also settable via the setup wizard
   msrcApiKey: ""           # optional
-  # Burstable memory headroom for ingestion only (plans/uct-sync-oom-fix.md
+  # Burstable memory headroom for ingestion only (plans/finished/intel/ingestion/2026-07-10-intel-ingestion-uct_sync_oom_fix.md
   # WS5 / decision D3): the UCT parser fix targets <1Gi, this is insurance
   # while the Ubuntu dataset grows. Small reservation, 4Gi ceiling — no other
   # component is affected (they keep the global `resources:` block).
@@ -420,7 +420,7 @@ resources:
 # HTTPS goes through the local forward proxy. ONLY supported with
 # deployMode: ingress (the chart fails render otherwise — compose/loadbalancer
 # run the api's lego TLS path, whose pinned UDP:53 resolver a CONNECT proxy can't
-# carry). See plans/enterprise-egress-proxy-support.md.
+# carry). See plans/finished/deploy/infra/2026-07-07-deploy-infra-enterprise_egress_proxy_support.md.
 # -----------------------------------------------------------------------------
 egress:
   enabled: false

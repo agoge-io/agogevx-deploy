@@ -20,7 +20,7 @@ Usage: {{ include "agogevx.image" (list . .Values.image.names.api) }}
 {{- end -}}
 
 {{/*
-External-database helpers (plans/finished/external-database-support.md).
+External-database helpers (plans/finished/platform/db/2026-06-15-platform-db-external_database_support.md).
 */}}
 {{- define "agogevx.dbBackendKind" -}}
 {{- if .Values.postgres.external.enabled -}}external{{- else -}}internal{{- end -}}
@@ -252,7 +252,7 @@ Usage: {{ include "agogevx.componentResources" (dict "root" . "component" .Value
 {{- end -}}
 
 {{/*
-Enterprise egress proxy (enclave) — plans/enterprise-egress-proxy-support.md.
+Enterprise egress proxy (enclave) — plans/finished/deploy/infra/2026-07-07-deploy-infra-enterprise_egress_proxy_support.md.
 */}}
 
 {{/* Fail render if egress is enabled outside ingress mode: compose/loadbalancer
