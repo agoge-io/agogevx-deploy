@@ -133,7 +133,9 @@ password stays only in the Secret. Emit under `env:` with `| nindent N`.
 BOOTSTRAP_KEY env from the app-secrets Secret (the vxctl-minted Fernet key).
 secretsvc reads this to decrypt the integration_secrets table, so every service
 that touches those rows (api, report-worker, audit-forward-worker,
-ingestion-worker) needs it when running without a bootstrap volume (ingress).
+ingestion-worker, maintenance-worker, mcp-server, and the matcher-worker and
+bte-recompute-worker for the Seq API key that authenticates their own log
+forwarding) needs it when running without a bootstrap volume (ingress).
 optional:true so a compose-mode K8s deploy (api writes bootstrap.key to the
 shared volume; secretsvc falls back to the file) is unaffected by a missing key.
 Emit under `env:` with `| nindent N`.
