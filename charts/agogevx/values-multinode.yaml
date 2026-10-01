@@ -79,7 +79,7 @@ ingestion:
 
 # Matcher HA floor = 3. vxctl raises this per fleet tier; a plain
 # `-f values-multinode.yaml` install gets the 3-replica floor (size up past ~1k
-# agents — see CLAUDE.md operating envelopes / vxctl --fleet-tier).
+# agents — see .claude/rules/scale.md / vx --fleet-tier).
 matcher:
   replicas: 3
 
