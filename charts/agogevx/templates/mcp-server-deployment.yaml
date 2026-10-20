@@ -70,7 +70,7 @@ spec:
 {{- if (and (include "agogevx.secretsFromEnv" .) .Values.api.appSecretsSecret) }}
             # Multi-node (ingress/loadbalancer): the API-key pepper(s) for inbound
             # HMAC verification come from the agogevx-secrets Secret (minted by
-            # vxctl), the same source the api uses. optional:true → a missing key
+            # vx), the same source the api uses. optional:true → a missing key
             # is fine at render time (the server then treats the pepper as empty
             # and rejects every key until it is present).
             - name: API_KEY_PEPPER

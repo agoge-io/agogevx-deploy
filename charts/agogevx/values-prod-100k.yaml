@@ -32,7 +32,7 @@
 #        kubectl -n agogevx create secret generic agogevx-db-ca --from-file=ca.crt=./db-ca.crt
 #        kubectl -n agogevx create secret generic agogevx-postgres \
 #          --from-literal=POSTGRES_PASSWORD=<app-db-password>
-#      (vxctl also mints agogevx-secrets for the api crypto material.)
+#      (vx k8s secrets init also mints agogevx-secrets for the api crypto material.)
 #   2. Set postgres.external.host below to the DB's FQDN (never an IP — TLS SAN).
 #   3. Configure object storage (System → Storage → private S3 bucket) on first
 #      boot BEFORE scaling traffic — blobVolumeKind=emptyDir keeps no shared volume.

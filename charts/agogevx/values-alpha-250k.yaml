@@ -2,15 +2,8 @@
 # Alpha cluster overlay for the 250k load test.
 #
 # Apply on top of the live install values (values-agogevx.yaml) before running
-# the realistic-250k-8h profile:
-#
-#   vxctl update \
-#     --context do-sfo3-agogevx-multi-node-k8s-test \
-#     --namespace agogevx \
-#     --agogevx-version <tag> \
-#     --values deploy/helm/agogevx/values-alpha-250k.yaml
-#
-# Or via helm directly (dry-run first):
+# the realistic-250k-8h profile. `vx k8s update` moves only image.version and
+# never applies a values file, so apply this overlay with helm (dry-run first):
 #   helm upgrade agogevx deploy/helm/agogevx \
 #     -n agogevx \
 #     -f customer_pack/kubernetes/install_data/values-agogevx.yaml \
@@ -26,7 +19,7 @@
 #    concurrent matcher writes + autovacuum.
 #
 # 2. After the test, roll back to the 100k configuration:
-#    helm upgrade agogevx ... -f values-alpha-100k.yaml (or remove --values)
+#    helm upgrade agogevx ... -f values-alpha-100k.yaml (or leave this file out of the -f list)
 #
 # Connection budget (verify before applying)
 # ------------------------------------------

@@ -59,6 +59,43 @@ spec:
             {{- include "agogevx.egressProxyEnv" . | nindent 12 }}
             {{- end }}
             {{- include "agogevx.bootstrapKeyEnv" . | nindent 12 }}
+            # The release this worker runs. A full backup that it makes (scheduled,
+            # or "Save backup to S3") records it in its manifest, so the archive
+            # names the release that can restore it.
+            - name: AGOGEVX_VERSION
+              value: {{ .Values.image.version | quote }}
+{{- if .Values.api.appSecretsSecret }}
+            # The four identity secrets, from the same Secret as the api. A full
+            # backup that this worker makes carries them in secrets.json, so a
+            # restore on another cluster brings the signing key, the two peppers
+            # and the MFA key. Without them such a backup carried empty secrets.
+            # optional:true, as on the api: a key the Secret lacks leaves the
+            # worker on bootstrap.json (compose mode).
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: SECRET_KEY
+                  optional: true
+            - name: API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: API_KEY_PEPPER
+                  optional: true
+            - name: AGENT_TOKEN_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: AGENT_TOKEN_PEPPER
+                  optional: true
+            - name: MFA_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.appSecretsSecret | quote }}
+                  key: MFA_ENCRYPTION_KEY
+                  optional: true
+{{- end }}
             - name: DB_POOL_SIZE
               value: {{ .Values.maintenance.dbPoolSize | quote }}
             - name: BOOTSTRAP_INSTANCE_DIR

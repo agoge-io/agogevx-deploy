@@ -18,7 +18,7 @@
 #   - no StorageClass setup: the cluster's default RWO class is used (storageClass:"")
 #
 # For the INGRESS profile instead (regulated/shared clusters, e.g. IL5 — set
-# deployMode=ingress + ingress.enabled=true via vxctl or --set), these must be
+# deployMode=ingress + ingress.enabled=true via vx or --set), these must be
 # pre-installed out of band: nginx-ingress (IngressClass "nginx"), cert-manager +
 # a dns01 ClusterIssuer, and an RWO StorageClass. See kubernetes-deployment.md.
 #
@@ -35,7 +35,7 @@
 # are NOT in S3 land on per-pod local disk (an avatar uploaded on pod A 404s on
 # pod B). See the runbook.
 #
-# All install secrets are minted at install by vxctl into the agogevx-secrets
+# All install secrets are minted at install by vx into the agogevx-secrets
 # Secret (SECRET_KEY / peppers / MFA key / BOOTSTRAP_KEY / PGBOUNCER_AUTH_PASSWORD)
 # — nothing is generated at runtime, so the api can run at N replicas from the
 # very first boot. EULA acceptance is per-user (users table); each user accepts
@@ -52,9 +52,9 @@ domain: valex.example.com
 # HA FLOOR (ha-floor-no-spof): a minimum of 3 replicas of EVERY stateless
 # component, so a single node failure can't take any part of the app fully offline
 # (the pdb + topologySpread blocks at the bottom make the spread + drain-protection
-# real). vxctl scales matcher per fleet tier (3 / 4 / 10 / 20) on top of this
+# real). vx scales matcher per fleet tier (3 / 4 / 10 / 20) on top of this
 # floor; the others stay flat at 3 unless a load test shows one binds. Un-pinning
-# api + frontend is safe from the very first boot — vxctl mints the full secret
+# api + frontend is safe from the very first boot — vx mints the full secret
 # set at install, so every replica reads identical secrets (agogevx-secrets) + config
 # (app_settings), with blobs in S3 (no bootstrap-config volume).
 api:
@@ -77,7 +77,7 @@ pgbouncer:
 ingestion:
   replicas: 3
 
-# Matcher HA floor = 3. vxctl raises this per fleet tier; a plain
+# Matcher HA floor = 3. vx raises this per fleet tier; a plain
 # `-f values-multinode.yaml` install gets the 3-replica floor (size up past ~1k
 # agents — see .claude/rules/scale.md / vx --fleet-tier).
 matcher:
@@ -94,7 +94,7 @@ auditForward:
 
 # INGRESS PROFILE ONLY. With deployMode=loadbalancer (the default above) this
 # whole block is inert — no Ingress is rendered. To use the ingress profile, set
-# deployMode=ingress and ingress.enabled=true (vxctl does this for you), which
+# deployMode=ingress and ingress.enabled=true (vx does this for you), which
 # activates the block below (and requires the out-of-band prereqs in the header).
 ingress:
   enabled: false

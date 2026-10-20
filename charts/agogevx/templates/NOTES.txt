@@ -41,7 +41,7 @@ DB routing:  {{ .Values.db.route }}  (api/workers -> {{ include "agogevx.dbHost"
 {{- if and (not .Values.postgres.existingSecret) (not .Values.postgres.password) (not $pgSecret) }}
 
 WARNING: no Postgres password found. db and api will fail to start. Provide one:
-  - run `vxctl` first (it creates the agogevx-postgres Secret in this namespace), or
+  - run `vx k8s secrets init` first (it creates the agogevx-postgres Secret in this namespace), or
   - --set postgres.password=$(openssl rand -base64 32), or
   - --set postgres.existingSecret=<secret-with-POSTGRES_PASSWORD>
 {{- end }}
@@ -51,9 +51,9 @@ Scaling the matcher (the primary throughput knob):
      helm upgrade {{ .Release.Name }} . -n {{ .Release.Namespace }} \
        --reuse-values --set matcher.replicas=4
 
-Tearing it down (vxctl keeps your data unless you opt in):
+Tearing it down (vx keeps your data unless you opt in):
 
-     vxctl teardown --namespace {{ .Release.Namespace }} --yes                    # helm uninstall, PVCs kept
-     vxctl teardown --namespace {{ .Release.Namespace }} --yes --delete-namespace # also deletes data
+     vx k8s teardown --namespace {{ .Release.Namespace }} --non-interactive --yes                    # helm uninstall, PVCs kept
+     vx k8s teardown --namespace {{ .Release.Namespace }} --non-interactive --yes --delete-namespace # also deletes data
 
 Full runbook: docs/internal_documentation/kubernetes-deployment.md

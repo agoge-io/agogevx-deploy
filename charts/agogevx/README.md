@@ -54,18 +54,17 @@ kubectl create secret docker-registry ghcr-creds \
 
 ## Install
 
-### Recommended: generate secrets with `vxctl` first
+### Recommended: generate secrets with `vx` first
 
-`vxctl` mints this install's unique secrets, writes an **encrypted backup
+`vx` mints this install's unique secrets, writes an **encrypted backup
 bundle** you keep, and creates the `agogevx-postgres` + `agogevx-secrets` (+ optional
 `ghcr-creds`) Secrets in the cluster — nothing secret touches git or values.
-Download the binary for your workstation from the
-[GitHub releases page](https://github.com/agogeio/agogevx/releases) (built from
-[go/cmd/vxctl](../../go/cmd/vxctl) via `vendor_tools/vxctl_build/vxctl-build.ps1`).
-Then install with no password flags:
+The binary for your workstation is in the customer pack
+(`vx-<os>-<arch>[.exe]`, built from [go/cmd/vx](../../../go/cmd/vx) by
+`vx installers`). Then install with no password flags:
 
 ```sh
-vxctl                 # interactive: pick cluster, enter GHCR token, set a backup passphrase
+vx                    # interactive: choose Kubernetes, pick cluster, enter GHCR token, set a backup passphrase
 # then:
 helm upgrade --install agogevx ./deploy/helm/agogevx \
   -f deploy/helm/agogevx/values-staging.yaml -n agogevx --create-namespace
@@ -73,7 +72,7 @@ helm upgrade --install agogevx ./deploy/helm/agogevx \
 
 The chart references `agogevx-postgres` (Postgres password) and `agogevx-secrets`
 (`SECRET_KEY`/peppers/MFA key, injected into the api as optional env) by default,
-so the secrets `vxctl` created are picked up automatically.
+so the secrets `vx` created are picked up automatically.
 
 ### Or supply the password inline (no installer)
 
@@ -126,7 +125,7 @@ The default values run single-node because every pod that shares a
 Use `values-multinode.yaml` (see `plans/finished/deploy/k8s/2026-06-13-deploy-k8s-bootstrap_secret_migration.md`, the
 authoritative design, plus `plans/finished/deploy/k8s/2026-06-13-deploy-k8s-multinode_loadbalancer_portable_storage.md`).
 
-**Two multi-node profiles** (pick with `deployMode`; vxctl exposes them as a
+**Two multi-node profiles** (pick with `deployMode`; vx exposes them as a
 choice):
 
 - **`loadbalancer` (default, recommended):** a `Service type: LoadBalancer` is the
@@ -153,7 +152,7 @@ blockers are resolved like this:
    from the `agogevx-secrets` Secret (crypto secrets + the Fernet `BOOTSTRAP_KEY` +
    the pgbouncer password — injected as env / a mounted file) and every non-secret
    config field lives in Postgres `app_settings`, so the `bootstrap-config` volume
-   is **dropped entirely** — it was the last RWX-needing volume. `vxctl` mints
+   is **dropped entirely** — it was the last RWX-needing volume. `vx` mints
    the full secret set at install, so the api runs at N replicas **from the very
    first boot** with no first-boot ordering or restart. (pgbouncer reads the
    password from the Secret; the api aligns the Postgres role to it.)
@@ -200,9 +199,9 @@ scale. Each file's header carries the per-tier connection-budget math; size the
 dedicated Postgres `max_connections` to the value in the last column before
 installing.
 
-`vxctl` selects these automatically: on a **multi-node Kubernetes install**
+`vx` selects these automatically: on a **multi-node Kubernetes install**
 (`--deploy-profile loadbalancer|ingress`, or the TUI/web multi-node profiles),
-choosing a fleet size of `25k`…`250k` makes vxctl deploy with
+choosing a fleet size of `25k`…`250k` makes vx deploy with
 `-f values-prod-<tier>.yaml` (and the sizing `--set`s are suppressed so the file
 is authoritative). These tiers require a dedicated/managed Postgres — pass
 `--external-db` (the wizard's external-DB step). To install by hand instead:
@@ -218,7 +217,7 @@ helm upgrade --install agogevx ./agogevx \
 
 To run behind an existing nginx-ingress + cert-manager instead of the default
 LoadBalancer profile, layer `values-ingress.yaml` **after** the tier file
-(vxctl does this for you under the ingress profile).
+(vx does this for you under the ingress profile).
 
 ## Values
 

@@ -130,7 +130,7 @@ password stays only in the Secret. Emit under `env:` with `| nindent N`.
 {{- end -}}
 
 {{/*
-BOOTSTRAP_KEY env from the app-secrets Secret (the vxctl-minted Fernet key).
+BOOTSTRAP_KEY env from the app-secrets Secret (the Fernet key that vx mints).
 secretsvc reads this to decrypt the integration_secrets table, so every service
 that touches those rows (api, report-worker, audit-forward-worker,
 ingestion-worker, maintenance-worker, mcp-server, and the matcher-worker and
@@ -241,7 +241,8 @@ capabilities:
 Per-component resources, falling back to the global .Values.resources default.
 A component value (e.g. .Values.matcher) may carry its own `resources:` block to
 override the global default — this lets the memory-heavy matcher take a larger
-limit (sized by vxctl from the node memory) without inflating every pod.
+limit (set in values.yaml and the tier files; vx does not set it) without
+inflating every pod.
 Usage: {{ include "agogevx.componentResources" (dict "root" . "component" .Values.matcher) | nindent 12 }}
 */}}
 {{- define "agogevx.componentResources" -}}

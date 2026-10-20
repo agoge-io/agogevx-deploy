@@ -2,14 +2,14 @@
 #
 # install.sh — menu-driven AGOGE VX Kubernetes installer (external Postgres).
 #
-# A pure-shell alternative to the `vxctl` binary for the Kubernetes production
+# A pure-shell alternative to the `vx` binary for the Kubernetes production
 # path, for machines where a compiled binary is blocked (locked-down / MDM
-# macOS, hardened Linux). It reproduces what `vxctl init --external-db` +
-# `vxctl deploy --external-db --fleet-tier <N>` do:
+# macOS, hardened Linux). It reproduces what `vx k8s secrets init --external-db`
+# + `vx k8s deploy --external-db --fleet-tier <N>` do:
 #
 #   1. Gather your managed/external Postgres details + the server CA.
 #   2. Mint this install's UNIQUE app-crypto secrets (openssl, in the exact
-#      byte-formats the api expects — see go/cmd/vxctl/secrets.go).
+#      byte-formats the api expects — see go/internal/vxtool/deploy/secrets.go).
 #   3. Create the cluster Secrets the chart consumes:
 #        agogevx-postgres  — your external DB role's password
 #        agogevx-db-ca     — the CA that signs the external DB's TLS cert
@@ -82,7 +82,7 @@ confirm() {
 }
 
 # ---------------------------------------------------------------------------
-# Secret generation — formats verified against go/cmd/vxctl/secrets.go.
+# Secret generation — formats verified against go/internal/vxtool/deploy/secrets.go.
 #   SECRET_KEY              base64url(32 bytes), NO padding  (RawURLEncoding)
 #   API_KEY_PEPPER          base64 std(32 bytes), padded     (StdEncoding)
 #   AGENT_TOKEN_PEPPER      base64 std(32 bytes), padded
@@ -154,7 +154,7 @@ detect_chart() {
 # ===========================================================================
 clear 2>/dev/null || true
 say "${BOLD}AGOGE VX — Kubernetes installer (external Postgres)${RST}"
-say "${DIM}Secrets + Helm production install, the vxctl way, in pure shell.${RST}"
+say "${DIM}Secrets + Helm production install, the vx way, in pure shell.${RST}"
 hr
 
 # --- 0) Preflight -----------------------------------------------------------
@@ -326,7 +326,7 @@ if confirm "Create a GHCR image-pull secret (needed if the images are private)?"
   fi
 fi
 
-# --- 8) Values file + --set flags (mirrors vxctl helmSets/helmArgs) ---------
+# --- 8) Values file + --set flags (mirrors vx helmSets/helmArgs) ------------
 VALUES_FILES=("$TIER_VALUES")
 SETS=("domain=$DOMAIN"
       "postgres.external.enabled=true"

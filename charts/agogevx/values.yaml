@@ -13,7 +13,7 @@
 image:
   registry: ghcr.io
   org: agoge-io            # AGOGEVX_GHCR_ORG
-  version: "3.2"           # AGOGEVX_VERSION — the release tag to deploy
+  version: "3.4"           # AGOGEVX_VERSION — the release tag to deploy
   pullPolicy: IfNotPresent # use Never to run locally-built images on Docker Desktop
   names:
     api: agogevx-api
@@ -70,7 +70,7 @@ postgres:
   shmSize: 1Gi             # /dev/shm size (compose shm_size: 1g)
 
   # External / managed Postgres (DO / RDS / Cloud SQL / Azure / self-managed).
-  # See plans/finished/platform/db/2026-06-15-platform-db-external_database_support.md. WRITTEN BY vxctl — do
+  # See plans/finished/platform/db/2026-06-15-platform-db-external_database_support.md. WRITTEN BY vx — do
   # not hand-edit. When enabled:
   #   - the in-cluster db StatefulSet + its postgres-data PVC + db Service are
   #     NOT rendered;
@@ -129,16 +129,20 @@ pgbouncer:
 api:
   # Only honoured under ingress mode (multi-node). Under compose mode the api is
   # always 1 (RWO bootstrap volume + Caddy admin push to a single frontend pod).
-  # Safe to run >1 from the very first boot: vxctl mints the full secret set at
+  # Safe to run >1 from the very first boot: vx mints the full secret set at
   # install (crypto secrets + Fernet BOOTSTRAP_KEY + pgbouncer password) into
   # agogevx-secrets, and non-secret config lives in app_settings — so every replica
   # reads identical secrets/config with no first-boot ordering or restart.
   replicas: 1
   dbPoolSize: 10
-  # Name of a Secret (created out-of-band by `vxctl`, never committed) holding
-  # the first-boot crypto secrets SECRET_KEY / API_KEY_PEPPER / AGENT_TOKEN_PEPPER /
-  # MFA_ENCRYPTION_KEY. Injected into the api as env (optional — a missing Secret
-  # is fine; the setup wizard then self-generates them). Set "" to disable injection.
+  # Name of a Secret (created out-of-band by `vx k8s secrets init`, never
+  # committed) holding the first-boot crypto secrets SECRET_KEY / API_KEY_PEPPER /
+  # AGENT_TOKEN_PEPPER / MFA_ENCRYPTION_KEY. Injected as env into the api and,
+  # since chart 0.7.0, the maintenance-worker, so its full backups carry them
+  # (optional — a missing Secret is fine; the setup wizard then self-generates
+  # them). The mcp-server reads API_KEY_PEPPER from it in the multi-node modes.
+  # `vx k8s db restore --archive` reads the Secret name from the api Deployment.
+  # Set "" to disable injection.
   appSecretsSecret: agogevx-secrets
   # Memory: a reserved 1Gi base (the main HTTP server — pools, caches, ~340 routes)
   # that can burst up to the 3Gi ceiling under load. Overrides the global `resources`
@@ -181,8 +185,8 @@ matcher:
   # from the 25k ramp (a 2Gi limit OOMKilled at concurrency 4 — see
   # plans/finished/deploy/k8s/2026-06-15-deploy-k8s-loadtest_capacity_sizing.md). request==limit so the scheduler reserves
   # the worst case and packs deterministically (~4/node on s-8vcpu-16gb), and a
-  # correlated spike can't overflow the node. vxctl `--node-mem-gib` overwrites
-  # these via --set when sizing a specific node; pkg/memlimit derives GOMEMLIMIT
+  # correlated spike can't overflow the node. vx does not set these; override
+  # them with --set when sizing a specific node. pkg/memlimit derives GOMEMLIMIT
   # (~90%) from whatever limit is set so the GC degrades instead of OOMing.
   resources:
     requests:

@@ -11,7 +11,7 @@ spec:
   # Multi-node (ingress OR loadbalancer): secrets come from the agogevx-secrets
   # Secret (env) and config from app_settings (DB), and blobs live in S3 — the
   # bootstrap-config volume is dropped (no RWX), so the api scales to N replicas
-  # across nodes. RollingUpdate keeps the API up during a helm upgrade. vxctl
+  # across nodes. RollingUpdate keeps the API up during a helm upgrade. vx
   # mints the full secret set at install, so all replicas read identical secrets
   # from the very first boot — no first-boot ordering needed. See README
   # "Scaling / multi-node".
@@ -124,12 +124,14 @@ spec:
               value: /app/report_artifacts
 {{- if .Values.api.appSecretsSecret }}
             # First-boot crypto secrets, when supplied out-of-band in the named
-            # Secret (created by `vxctl`, never committed to git/values). The
-            # api reads env over bootstrap.json, so these win when present.
-            # optional:true → a missing Secret is fine: the api then self-generates
-            # them onto the bootstrap volume via the setup wizard, exactly as today.
-            # Only the api uses these (report-/ingestion-workers do not), so they
-            # are injected here only — no api/worker split-brain.
+            # Secret (created by `vx k8s secrets init`, never committed to
+            # git/values). The api reads env over bootstrap.json, so these win
+            # when present. optional:true → a missing Secret is fine: the api then
+            # self-generates them onto the bootstrap volume via the setup wizard.
+            # The maintenance-worker gets the same four keys from the same Secret
+            # (chart 0.7.0), so the full backups it makes carry them. In the
+            # multi-node modes the mcp-server gets API_KEY_PEPPER (and its
+            # _PREVIOUS key). The other workers get none of the four.
             - name: SECRET_KEY
               valueFrom:
                 secretKeyRef:
