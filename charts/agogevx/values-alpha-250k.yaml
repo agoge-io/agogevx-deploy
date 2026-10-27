@@ -14,9 +14,12 @@
 # Pre-requisites
 # --------------
 # 1. Resize the DO managed DB to gd-8vcpu-32gb (or larger) before applying.
-#    At 250k agents, host_vulnerabilities is ~17.5 GB. The gd-4vcpu-16gb
-#    shared_buffers (~4 GB) cannot cache the hot table and pegs DB CPU under
-#    concurrent matcher writes + autovacuum.
+#    The gd-4vcpu-16gb shared_buffers (~4 GB) pegs DB CPU under concurrent
+#    matcher writes + autovacuum. The disk size depends on the findings per
+#    host: at 1.875 B open findings (250k hosts × 7,500) the database is about
+#    1.5 TB without the report views and about 3.2 TB with them, before bloat
+#    (inferred: 186 × the 10M tier, docs/perf/05-benchmark-results.md §6). The
+#    old "~17.5 GB" for host_vulnerabilities assumed a far smaller fleet.
 #
 # 2. After the test, roll back to the 100k configuration:
 #    helm upgrade agogevx ... -f values-alpha-100k.yaml (or leave this file out of the -f list)

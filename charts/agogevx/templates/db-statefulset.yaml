@@ -19,6 +19,13 @@ spec:
       labels:
         {{- include "agogevx.commonLabels" . | nindent 8 }}
         app.kubernetes.io/component: db
+      annotations:
+        # postgresql.conf is mounted by subPath (below), so the kubelet never
+        # refreshes it in a running pod. A change to db-config.yaml changes
+        # this checksum, which rolls the pod: Postgres restarts, and the
+        # settings that need a restart (shared_preload_libraries,
+        # track_activity_query_size) apply.
+        checksum/config: {{ include (print $.Template.BasePath "/db-config.yaml") . | sha256sum }}
     spec:
       serviceAccountName: agogevx
       automountServiceAccountToken: false

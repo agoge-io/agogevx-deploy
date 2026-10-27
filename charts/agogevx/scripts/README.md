@@ -61,9 +61,11 @@ reproducing `vx k8s secrets init --external-db` + `vx k8s deploy --external-db
 - optionally runs the same **in-cluster `select 1` pre-check** vx does
   (validates TLS + auth from *inside* the cluster, so a private-VPC DB your
   laptop can't reach is still checked);
-- optionally runs a **one-time DB privilege bootstrap**: on a fresh managed DB
-  (PostgreSQL 15+), the app user can't create its own tables until an admin
-  grants it `CREATE` on the database + `public` schema and installs
+- optionally runs a **one-time DB privilege bootstrap** (the managed DB must run
+  PostgreSQL 17 or later; the migrations need 17): on a fresh managed DB the app
+  user can't create its own tables until an admin grants it `CREATE` on the
+  database + `public` schema (since PostgreSQL 15, `public` gives no user
+  `CREATE` by default) and installs
   `pg_stat_statements` / `pg_trgm`. If you opt in, the script asks for your DB
   **admin** creds (e.g. `doadmin`), runs the grants through a one-off in-cluster
   Job, then deletes the Job **and** the transient admin Secret — the admin

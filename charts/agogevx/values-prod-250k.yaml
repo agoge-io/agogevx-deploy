@@ -10,8 +10,11 @@
 #   Steady-state load ....... ~2.9–11.6 req/s (250k agents, 6–24 h check-in cadence)
 #   NOTE: 250k is being validated on the alpha K8s cluster — treat as the target
 #   ceiling and watch the match_jobs backlog + PgBouncer client-wait under load.
-#   At 250k, host_vulnerabilities is ~17.5 GB; the 64 GB DB's shared_buffers must
-#   cache the hot table (the 32 GB tier cannot, and pegs DB CPU under matcher writes).
+#   At 250k with 1.875 B open findings, the database is about 1.5 TB without the
+#   report views and about 3.2 TB with them, before bloat (inferred: 186 × the 10M
+#   tier, docs/perf/05-benchmark-results.md §6): size the disk for that. The old
+#   "~17.5 GB" for host_vulnerabilities assumed a far smaller fleet. The 32 GB DB
+#   tier pegged DB CPU under matcher writes; use the 64 GB one.
 #
 # Component replicas (HA floor 3 everywhere; matcher is the throughput knob)
 #   matcher-worker .......... 25       pgbouncer ............... 3
