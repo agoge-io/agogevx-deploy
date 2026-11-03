@@ -32,6 +32,7 @@ data:
     track_activity_query_size = 16384
     log_min_duration_statement = 5s
     log_temp_files = 10MB
+    log_line_prefix = '%m [%p] %q[%a] '
     auto_explain.log_min_duration = 30s
     auto_explain.log_analyze = off
     auto_explain.log_format = json
