@@ -21,19 +21,25 @@
 #   api ..................... 3        frontend ................ 3
 #   ingestion-worker ........ 3        report-worker ........... 3
 #   maintenance-worker ...... 3        bte-recompute-worker .... 3
-#   audit-forward-worker .... 3
+#   audit-forward-worker .... 3        mcp-server .............. 3
 #
 # Connection budget (db.route=pgbouncer → every app pool dials the 3 in-cluster
 # poolers, which front the dedicated Postgres). Size the DB's max_connections:
-#   through-pgbouncer client demand ...... 305
-#       api 3×10=30  bte 3×8=24  ingestion 3×5=15  maintenance 3×4=12
-#       report 3×4=12  audit 3×4=12  matcher 25×8=200
-#   relay cap (3 × defaultPoolSize 150) ... 450   (1.48× demand — headroom)
-#   matcher cache pool (DIRECT, 25×2) .....  50   (bypasses pgbouncer, hits DB direct)
+#   through-pgbouncer client demand ...... 338
+#       api 3×10=30  bte 3×12=36 (pool 8 + overflow 4)  ingestion 3×5=15
+#       maintenance 3×6=18  report 3×4=12  audit 3×4=12  mcp 3×5=15
+#       matcher 25×8=200
+#   relay cap (3 × defaultPoolSize 150) ... 450   (1.33× demand — headroom)
+#   A client over the relay cap waits for a free server connection
+#   (transaction mode); it does not fail.
+#   DIRECT connections (bypass pgbouncer, hit the DB direct):
+#       matcher cache pool (25×2) .........  50
+#       api, ingestion, maintenance and report locks, CONCURRENTLY
+#       refreshes and maintenance housekeeping .. about 10–25
 #   → set the dedicated Postgres  max_connections ≥ 600
 #
-# Install (loadbalancer profile — cloud LB + frontend Caddy self-ACME; no
-# nginx-ingress, no cert-manager):
+# Install (loadbalancer profile — a cloud LB; the api obtains the Let's Encrypt
+# cert and every frontend pod serves it; no nginx-ingress, no cert-manager):
 #   1. Provision the dedicated Postgres, then create its two Secrets:
 #        kubectl -n agogevx create secret generic agogevx-db-ca --from-file=ca.crt=./db-ca.crt
 #        kubectl -n agogevx create secret generic agogevx-postgres \
@@ -77,7 +83,7 @@ db:
 # --- PgBouncer (transaction-mode pool) ---------------------------------------
 pgbouncer:
   replicas: 3
-  # Relay cap = replicas × defaultPoolSize = 450 upstream slots (1.48× the 305
+  # Relay cap = replicas × defaultPoolSize = 450 upstream slots (1.33× the 338
   # demand). This is the first tier where the 100-default relay cap (300) is below
   # demand, so defaultPoolSize is raised. Raise the dedicated Postgres
   # max_connections (≥ 600) BEFORE applying — verify it accepts the 450 upstream.
@@ -98,6 +104,8 @@ maintenance:
 bte:
   replicas: 3
 auditForward:
+  replicas: 3
+mcp:
   replicas: 3
 
 # --- Matcher: the throughput knob (25 at this tier) --------------------------

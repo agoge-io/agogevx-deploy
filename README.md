@@ -22,7 +22,7 @@ and adapt your own deployment overlays.
 | `helm` | 3.8+ (OCI support) |
 | `kubectl` | configured for your cluster |
 | GHCR pull credential | a GitHub username + a Personal Access Token with **`read:packages`**, issued at onboarding — needed because the **images are private** even though this chart is public |
-| Postgres | for multi-node / production, an **external** (managed) Postgres; a single-node evaluation can use the in-chart Postgres |
+| Postgres | for multi-node / production, an **external** (managed) Postgres; a one-node trial (`values.yaml` alone, the chart's compose mode) can use the in-chart Postgres |
 | License key | issued at onboarding; pasted into the setup wizard on first browse |
 
 `linux/amd64` images only.
@@ -47,9 +47,10 @@ kubectl create secret docker-registry ghcr-creds \
 
 ### 2. Application secrets
 
-- **Single-node / evaluation:** skip this — the api self-generates its crypto
-  secrets on first boot when the `agogevx-secrets` Secret is absent, and the
-  in-chart Postgres generates its own password.
+- **One-node trial (`values.yaml` alone):** skip this — the api self-generates
+  its crypto secrets on first boot when the `agogevx-secrets` Secret is absent,
+  and the in-chart Postgres generates its own password. For a real single
+  machine, the Docker Compose install is the supported path.
 - **Multi-node / production:** the api cannot self-generate onto a shared volume
   when it scales across nodes, so create the full secret set first. The chart
   ships a pure-shell helper that does this without any extra binary:
@@ -96,15 +97,14 @@ matches your fleet; each sets replicas, DB pool sizes, and PgBouncer routing:
 
 | Profile | Fleet |
 | --- | --- |
-| `values.yaml` (defaults) | ≤ 1,000 agents |
+| `values.yaml` (defaults) | ≤ 1,000 agents (a one-node trial; 3 pods of every service except the database, api and frontend 1) |
 | `values-prod-25k.yaml` | ~25,000 |
 | `values-prod-50k.yaml` | ~50,000 |
 | `values-prod-100k.yaml` | ~100,000 |
 | `values-prod-150k.yaml` | ~150,000 |
 | `values-prod-200k.yaml` | ~200,000 |
 | `values-prod-250k.yaml` | ~250,000 |
-| `values-staging.yaml` | small staging cluster |
-| `values-multinode.yaml` | multi-node baseline |
+| `values-multinode.yaml` | multi-node baseline (3 pods of every service except the database) |
 | `values-ingress.yaml` | ingress (vs LoadBalancer) profile |
 
 Override individual values with `--set` as usual. Key values:

@@ -29,11 +29,12 @@
 # config + install-state lives in app_settings (Postgres). Multi-node therefore
 # needs only RWO block storage + S3. (k8s-bootstrap-secret-migration.)
 #
-# APPLICATION prerequisite (B3): configure object storage on the admin Storage
-# page (System -> Storage -> point at a private S3 bucket) BEFORE scaling the api
-# or report-worker past 1 replica. With blobVolumeKind=emptyDir below, blobs that
-# are NOT in S3 land on per-pod local disk (an avatar uploaded on pod A 404s on
-# pod B). See the runbook.
+# APPLICATION prerequisite (B3): the api and the report-worker run 3 pods from
+# the first install, so configure object storage on the admin Storage page
+# (System -> Storage -> point at a private S3 bucket) on first boot, before you
+# put traffic on the app. With blobVolumeKind=emptyDir below, blobs that are NOT
+# in S3 land on per-pod local disk (an avatar uploaded on pod A 404s on pod B).
+# See the runbook.
 #
 # All install secrets are minted at install by vx into the agogevx-secrets
 # Secret (SECRET_KEY / peppers / MFA key / BOOTSTRAP_KEY / PGBOUNCER_AUTH_PASSWORD)
@@ -44,16 +45,16 @@
 
 deployMode: loadbalancer
 
-# Real public hostname. Under loadbalancer this is the name Caddy obtains the LE
-# cert for (point its DNS at the LB IP post-install). Under the ingress profile it
-# must also match ingress.host.
+# Real public hostname. Under loadbalancer this is the name the api obtains the LE
+# cert for, and every frontend pod serves that cert (point its DNS at the LB IP
+# post-install). Under the ingress profile it must also match ingress.host.
 domain: valex.example.com
 
 # HA FLOOR (ha-floor-no-spof): a minimum of 3 replicas of EVERY stateless
 # component, so a single node failure can't take any part of the app fully offline
 # (the pdb + topologySpread blocks at the bottom make the spread + drain-protection
-# real). vx scales matcher per fleet tier (3 / 4 / 10 / 20) on top of this
-# floor; the others stay flat at 3 unless a load test shows one binds. Un-pinning
+# real). vx scales matcher per fleet tier (S 3 / M 3 / L 5 / XL 10) on top of
+# this floor; the others stay flat at 3 unless a load test shows one binds. Un-pinning
 # api + frontend is safe from the very first boot — vx mints the full secret
 # set at install, so every replica reads identical secrets (agogevx-secrets) + config
 # (app_settings), with blobs in S3 (no bootstrap-config volume).
@@ -65,7 +66,7 @@ frontend:
 
 # pgbouncer at 3 removes the request-path SPOF AND gives ~3 relay cores (the
 # single-threaded relay was the 100k throughput ceiling). 3 × defaultPoolSize(100)
-# = 300 upstream — fits the in-cluster Postgres (max_connections 350 in db-config.yaml)
+# = 300 upstream — fits the in-cluster Postgres (max_connections 400 in db-config.yaml)
 # and a ≥397-conn managed DB. Raise the pool only after raising the DB's
 # max_connections (see the budget invariant in values.yaml). Already the base default;
 # repeated here for the multi-node doc.
@@ -90,6 +91,14 @@ bte:
   replicas: 3
 
 auditForward:
+  replicas: 3
+
+# Every scheduled loop has a guard that makes 3 pods safe (see values.yaml).
+maintenance:
+  replicas: 3
+
+# The MCP server keeps no state; the mcp-server Service sends /mcp to any pod.
+mcp:
   replicas: 3
 
 # INGRESS PROFILE ONLY. With deployMode=loadbalancer (the default above) this

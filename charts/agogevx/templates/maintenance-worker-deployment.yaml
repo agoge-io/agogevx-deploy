@@ -6,8 +6,8 @@ metadata:
     {{- include "agogevx.commonLabels" . | nindent 4 }}
     app.kubernetes.io/component: maintenance-worker
 spec:
-  # Single replica is sufficient — each scheduler self-arbitrates across
-  # replicas via pg_try_advisory_*lock, so >1 is safe but only adds lock churn.
+  # HA floor 3 (values.yaml). Each scheduled loop has a guard that makes 3 pods
+  # safe: a lock, SKIP LOCKED, or a unique index. values.yaml lists them.
   replicas: {{ .Values.maintenance.replicas }}
   selector:
     matchLabels:
@@ -44,6 +44,20 @@ spec:
                   app.kubernetes.io/name: agogevx
                   app.kubernetes.io/component: api
               topologyKey: kubernetes.io/hostname
+{{- end }}
+{{- if .Values.topologySpread.enabled }}
+      # Soft node spread (HA floor) — keep the maintenance pods on different nodes
+      # so a node loss can't pause every scheduled loop. ScheduleAnyway never
+      # blocks scheduling. In compose mode a required affinity rule pins the pods
+      # to the api node first; this soft rule cannot move them.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: maintenance-worker
 {{- end }}
       securityContext:
         {{- include "agogevx.podSecurityContext" . | nindent 8 }}

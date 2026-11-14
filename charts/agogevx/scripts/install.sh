@@ -230,7 +230,7 @@ ok "tier: $TIER  ($TIER_VALUES)"
 # --- 4) Deploy profile + domain ---------------------------------------------
 hr
 say "${BOLD}Ingress path${RST}"
-say "  ${CYN}1)${RST} loadbalancer  cloud LoadBalancer + Caddy self-ACME (recommended; baked into the tier file)."
+say "  ${CYN}1)${RST} loadbalancer  cloud LoadBalancer; the api gets the Let's Encrypt cert (recommended; baked into the tier file)."
 say "  ${CYN}2)${RST} ingress       behind an EXISTING nginx-ingress + cert-manager."
 ask PROFILE_PICK "Profile number" "1"
 case "$PROFILE_PICK" in

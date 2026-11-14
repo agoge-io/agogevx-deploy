@@ -27,6 +27,20 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+      # Compose mode: bootstrap-config is RWO, so co-locate with api. Without this
+      # a matcher pod on another node of a multi-node cluster stays in
+      # ContainerCreating with a Multi-Attach error. Under ingress/loadbalancer the
+      # bootstrap volume is dropped (BOOTSTRAP_KEY env), so the worker spreads freely.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agogevx
+                  app.kubernetes.io/component: api
+              topologyKey: kubernetes.io/hostname
+{{- end }}
       {{- with .Values.matcher.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}

@@ -157,8 +157,10 @@ Normalized deployment mode: "compose" (default) | "ingress" | "loadbalancer".
                    secrets/config on RWO volumes. (topology=single)
   - ingress      : multi-node behind nginx-ingress + cert-manager; secrets from
                    the agogevx-secrets Secret; api scales.
-  - loadbalancer : multi-node behind a Service type=LoadBalancer; the frontend
-                   Caddy self-ACMEs; secrets from the agogevx-secrets Secret; api scales.
+  - loadbalancer : multi-node behind a Service type=LoadBalancer; the api obtains
+                   the Let's Encrypt cert into the frontend-tls Secret and every
+                   frontend pod serves it; secrets from the agogevx-secrets Secret;
+                   api and frontend scale.
 "compose" and "loadbalancer" both keep ingress.enabled=false (the Ingress objects
 render only under ingress.enabled), so the boolean alone cannot tell them apart —
 templates that differ between them MUST use these helpers.
@@ -172,7 +174,7 @@ templates that differ between them MUST use these helpers.
 {{- if eq (include "agogevx.deployMode" .) "compose" -}}true{{- end -}}
 {{- end -}}
 
-{{/* "true" in loadbalancer mode (frontend Caddy self-ACME behind a LoadBalancer Service). */}}
+{{/* "true" in loadbalancer mode (a LoadBalancer Service; the frontend serves the api-issued cert). */}}
 {{- define "agogevx.isLoadBalancer" -}}
 {{- if eq (include "agogevx.deployMode" .) "loadbalancer" -}}true{{- end -}}
 {{- end -}}
@@ -265,6 +267,37 @@ Enterprise egress proxy (enclave) — plans/finished/deploy/infra/2026-07-07-dep
 {{- define "agogevx.validateEgress" -}}
 {{- if and .Values.egress.enabled (ne (include "agogevx.deployMode" .) "ingress") -}}
 {{- fail "egress.enabled is only supported with deployMode: ingress" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Fail render when two or more pods would share a one-node blob disk. In the
+     multi-node modes (ingress, loadbalancer) these pods carry no affinity and
+     spread across nodes, and a ReadWriteOnce (or ReadWriteOncePod) disk attaches
+     to one node only: a pod on another node stays in ContainerCreating with a
+     Multi-Attach error. user-uploads is mounted by every api pod; report-artifacts
+     by every api pod AND every report-worker pod, so 1 api + 1 report-worker pod
+     already share it (Phase 2 of the replica floor plan; before, only more than
+     1 api or more than 1 report pod failed). The access mode is the effective one
+     (the per-volume override, else the global persistence.accessMode), so the
+     all-RWX fallback passes. Compose mode pins the api to 1 and co-locates the
+     report-worker with it, so it is not checked. Invoke once from a template that
+     always renders (api-deployment.yaml). */}}
+{{- define "agogevx.validateBlobVolumes" -}}
+{{- $g := .Values.persistence -}}
+{{- if and (ne (include "agogevx.deployMode" .) "compose") (eq ($g.blobVolumeKind | default "pvc") "pvc") -}}
+{{- $vols := $g.volumes | default dict -}}
+{{- $uploads := (get $vols "userUploads") | default dict -}}
+{{- $artifacts := (get $vols "reportArtifacts") | default dict -}}
+{{- $uploadsMode := $uploads.accessMode | default $g.accessMode -}}
+{{- $artifactsMode := $artifacts.accessMode | default $g.accessMode -}}
+{{- $oneNode := list "ReadWriteOnce" "ReadWriteOncePod" -}}
+{{- $api := int .Values.api.replicas -}}
+{{- $report := int .Values.report.replicas -}}
+{{- $uploadsShared := and (gt $api 1) (has $uploadsMode $oneNode) -}}
+{{- $artifactsShared := and (gt (add $api $report) 1) (has $artifactsMode $oneNode) -}}
+{{- if or $uploadsShared $artifactsShared -}}
+{{- fail (printf "deployMode %s spreads %d api and %d report-worker pods across nodes, but persistence.blobVolumeKind=pvc keeps their blobs on one-node disks: userUploads (%s) is mounted by every api pod, and reportArtifacts (%s) by every api and report-worker pod. Fix: set persistence.blobVolumeKind=emptyDir and configure S3 on System -> Storage on first boot, or set persistence.volumes.userUploads.accessMode and persistence.volumes.reportArtifacts.accessMode to ReadWriteMany (the all-RWX fallback)." (include "agogevx.deployMode" .) $api $report $uploadsMode $artifactsMode) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

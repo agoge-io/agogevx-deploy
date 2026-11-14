@@ -19,7 +19,8 @@ vx k8s secrets init --context <ctx> --namespace agogevx \
 vx k8s secrets restore --bundle ./agogevx-secrets.age --passphrase-env AGOGEVX_BUNDLE_PASS --non-interactive
 
 # --- Kubernetes lifecycle (helm) ---
-vx k8s deploy   --context <ctx> --namespace agogevx --non-interactive          # helm upgrade --install
+# vx deploys multi-node only: name --deploy-profile loadbalancer|ingress (or a production --fleet-tier)
+vx k8s deploy   --context <ctx> --namespace agogevx --deploy-profile loadbalancer --domain <fqdn> --non-interactive   # helm upgrade --install
 vx k8s teardown --context <ctx> --namespace agogevx --non-interactive --yes     # helm uninstall (keeps data)
 vx k8s teardown --context <ctx> --namespace agogevx --non-interactive --yes \
   --delete-namespace                                                            # also deletes the namespace + PVCs (DATA LOSS)

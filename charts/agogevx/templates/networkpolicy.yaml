@@ -4,6 +4,7 @@ Network segmentation (security review #2). Default-deny INGRESS for the whole
 namespace, then allow only the paths the app needs:
   - public/LB -> frontend on 80/443 (+ api -> frontend:2019 admin under compose)
   - frontend  -> api on 5000
+  - frontend  -> mcp-server on 5001 (Caddy proxies /mcp to the mcp-server Service)
   - any agogevx pod -> in-cluster db (5432) / pgbouncer (6432), when rendered
 Workers expose no ports, so default-deny fully covers them.
 
@@ -78,6 +79,32 @@ spec:
       ports:
         - protocol: TCP
           port: 5000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mcp-ingress
+  labels:
+    {{- include "agogevx.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agogevx
+      app.kubernetes.io/component: mcp-server
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the frontend (Caddy) proxies /mcp to the mcp-server Service. Without
+    # this rule the default deny above blocks it, and an AI client gets a
+    # timeout or a 502 on every production tier (they all enable this policy).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agogevx
+              app.kubernetes.io/component: frontend
+      ports:
+        - protocol: TCP
+          port: 5001
 {{- if eq .Values.db.route "pgbouncer" }}
 ---
 apiVersion: networking.k8s.io/v1

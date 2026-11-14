@@ -1,4 +1,5 @@
 {{- include "agogevx.validateEgress" . -}}
+{{- include "agogevx.validateBlobVolumes" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -93,10 +94,11 @@ spec:
             - name: API_BIND
               value: ":5000"
             # Deployment-mode selector. "ingress" (cert-manager) and
-            # "loadbalancer" (frontend Caddy self-ACME) both gate off the api's TLS
-            # boot actions (bootstrap-cert, lego renewal cron, Caddy admin push) and
-            # lock the in-app /api/v1/tls/* mutation routes. Unset/"compose" =
-            # single-node behaviour (the api manages TLS).
+            # "loadbalancer" (the api's HTTP-01 issuer fills the frontend-tls
+            # Secret) both gate off the compose TLS boot actions (bootstrap-cert,
+            # lego renewal cron, Caddy admin push) and lock the in-app
+            # /api/v1/tls/* mutation routes. Unset/"compose" = single-node
+            # behaviour (the api manages TLS).
             - name: DEPLOY_MODE
               value: {{ .Values.deployMode | default "compose" | quote }}
 {{- if (include "agogevx.isLoadBalancer" .) }}
@@ -235,11 +237,11 @@ spec:
               readOnly: true
 {{- end }}
 {{- if (include "agogevx.isCompose" .) }}
-            # Compose mode only. When the api does not manage TLS — ingress
-            # (cert-manager) or loadbalancer (the frontend Caddy self-ACMEs) —
-            # bootstrapcertsvc.Ensure + lego are gated off and the api writes no
-            # certs, so this mount is dropped (the frontend owns tls-certs in
-            # loadbalancer; nobody mounts it under ingress).
+            # Compose mode only. Outside compose — ingress (cert-manager) or
+            # loadbalancer (the api's HTTP-01 issuer writes the frontend-tls
+            # Secret) — bootstrapcertsvc.Ensure + lego are gated off and the api
+            # writes no certs to this disk, so the mount is dropped (nobody
+            # mounts tls-certs outside compose).
             - name: tls-certs
               mountPath: /app/tls
 {{- end }}

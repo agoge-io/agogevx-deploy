@@ -50,3 +50,10 @@ certManager:
   # Leave false for a single FQDN (ingress-shim handles it). Set true only for a
   # wildcard cert.
   renderCertificate: false
+
+# Blobs in S3, no shared blob disk: the api and the report-worker run 3 pods
+# (the chart default), and 3 pods on different nodes cannot share a
+# ReadWriteOnce disk. Configure object storage (System -> Storage -> a private
+# S3 bucket) on first boot, before you put traffic on the app.
+persistence:
+  blobVolumeKind: emptyDir

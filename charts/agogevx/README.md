@@ -1,28 +1,33 @@
 # AGOGE VX Helm chart
 
-Deploys the AGOGE VX stack on Kubernetes using the **same nine GHCR images** the
+Deploys the AGOGE VX stack on Kubernetes using the **same 11 GHCR images** the
 Docker Compose path publishes (`ghcr.io/<org>/agogevx-*`). This is an **additive**
 deployment method — the Compose path (`docker-compose.yml`, `customer_pack/docker/`) is
 unchanged and remains fully supported.
 
-> **Defaults are single-node** (Docker Desktop staging): `api`, `ingestion-worker`,
-> and `frontend` are pinned to 1 replica and storage is `ReadWriteOnce`. Multi-node
-> across a real cluster **is supported** (no `ReadWriteMany` storage required) — see
-> **Scaling / multi-node** below before running this on a real cluster.
+> **Every service except the database runs 3 pods by default** (the HA floor), so
+> one node failure cannot take any service fully offline. The default `deployMode`
+> is `compose`: one node, for a trial with a plain `helm install` of `values.yaml`.
+> In that mode the templates pin `api` and `frontend` to 1 pod, and storage is
+> `ReadWriteOnce`. `vx` deploys only the multi-node modes (`loadbalancer`,
+> `ingress`); for one machine, use the Docker Compose install. Multi-node needs no
+> `ReadWriteMany` storage — see **Scaling / multi-node** below.
 
 ## What gets deployed
 
 | Workload | Kind | Service | Replicas |
 |---|---|---|---|
-| db (Postgres) | StatefulSet | `db` (headless, 5432) | 1 |
-| pgbouncer | Deployment | `pgbouncer` (6432) | 1 |
-| api | Deployment | `api` (5000) | 1 |
-| matcher-worker | Deployment | — | `matcher.replicas` |
-| ingestion-worker | Deployment | — | 1 |
-| report-worker | Deployment | — | `report.replicas` |
-| bte-recompute-worker | Deployment | — | `bte.replicas` |
-| audit-forward-worker | Deployment | — | `auditForward.replicas` |
-| frontend (Caddy + SPA) | Deployment | `frontend` (ClusterIP 2019/80/443) + `frontend-lb` (LoadBalancer 80/443) | 1 |
+| db (Postgres) | StatefulSet | `db` (headless, 5432) | 1 (no database HA) |
+| pgbouncer | Deployment | `pgbouncer` (6432) | `pgbouncer.replicas` (3) |
+| api | Deployment | `api` (5000) | `api.replicas` (3); 1 in compose mode |
+| matcher-worker | Deployment | — | `matcher.replicas` (3) |
+| ingestion-worker | Deployment | — | `ingestion.replicas` (3) |
+| report-worker | Deployment | — | `report.replicas` (3) |
+| maintenance-worker | Deployment | — | `maintenance.replicas` (3) |
+| bte-recompute-worker | Deployment | — | `bte.replicas` (3) |
+| audit-forward-worker | Deployment | — | `auditForward.replicas` (3) |
+| mcp-server | Deployment | `mcp-server` (5001) | `mcp.replicas` (3) |
+| frontend (Caddy + SPA) | Deployment | `frontend` (ClusterIP 2019/80/443) + `frontend-lb` (LoadBalancer 80/443) | `frontend.replicas` (3); 1 in compose mode |
 
 Under the default (compose) mode five `ReadWriteOnce` PVCs hold state:
 `postgres-data`, `bootstrap-config`, `tls-certs`, `user-uploads`,
@@ -38,7 +43,8 @@ container temp dir, matching the docker-compose removal.)
 
 ## Prerequisites
 
-- Kubernetes (Docker Desktop's built-in cluster is the v1 target) + `kubectl`
+- Kubernetes + `kubectl`: a multi-node cluster (3 nodes or more) for a `vx`
+  deploy; Docker Desktop's built-in cluster for the one-node trial
 - Helm 3.8+ (Helm 4 works too)
 - A pull secret for the private GHCR images, and a Postgres password.
 
@@ -54,39 +60,59 @@ kubectl create secret docker-registry ghcr-creds \
 
 ## Install
 
-### Recommended: generate secrets with `vx` first
+> **`vx` deploys Kubernetes on a multi-node cluster only:** the `loadbalancer` or
+> `ingress` profile, or a production tier. It no longer deploys a single-node
+> Kubernetes install. For one machine, use the Docker Compose install. A plain
+> `helm install` of `values.yaml` still runs the chart's one-node compose mode
+> (below), for a trial.
+
+### Recommended: generate secrets and deploy with `vx`
 
 `vx` mints this install's unique secrets, writes an **encrypted backup
 bundle** you keep, and creates the `agogevx-postgres` + `agogevx-secrets` (+ optional
 `ghcr-creds`) Secrets in the cluster — nothing secret touches git or values.
 The binary for your workstation is in the customer pack
 (`vx-<os>-<arch>[.exe]`, built from [go/cmd/vx](../../../go/cmd/vx) by
-`vx installers`). Then install with no password flags:
+`vx installers`). Then deploy with no password flags:
 
 ```sh
 vx                    # interactive: choose Kubernetes, pick cluster, enter GHCR token, set a backup passphrase
-# then:
-helm upgrade --install agogevx ./deploy/helm/agogevx \
-  -f deploy/helm/agogevx/values-staging.yaml -n agogevx --create-namespace
+# then (multi-node, a cloud load balancer; or --deploy-profile ingress):
+vx k8s deploy --deploy-profile loadbalancer --domain agogevx.example.com --namespace agogevx --non-interactive
 ```
 
 The chart references `agogevx-postgres` (Postgres password) and `agogevx-secrets`
 (`SECRET_KEY`/peppers/MFA key, injected into the api as optional env) by default,
 so the secrets `vx` created are picked up automatically.
 
-### Or supply the password inline (no installer)
+### Or install with helm (no installer)
+
+Multi-node, with the password inline:
 
 ```sh
 helm upgrade --install agogevx ./deploy/helm/agogevx \
-  -f deploy/helm/agogevx/values-staging.yaml \
+  -f deploy/helm/agogevx/values-multinode.yaml \
+  --set domain=agogevx.example.com \
   --set postgres.password="$(openssl rand -base64 32)" \
   -n agogevx --create-namespace
 ```
 
-Then watch `kubectl -n agogevx get pods -w` and open `https://localhost/` for the
-setup wizard (accept the self-signed cert). The wizard collects the domain,
-public URLs, NVD/MSRC/Resend keys, admin account, and license — exactly as on
-Compose. None of those belong in chart values.
+A one-node trial (Docker Desktop's built-in cluster): `values.yaml` alone runs the
+compose mode. The api issues the TLS cert, the api and the frontend run 1 pod
+each, and every other service except db runs 3. It reserves about 14.4 GiB of
+memory, mostly 3 matchers × 3 GiB; add `--set matcher.replicas=1` on a small
+machine.
+
+```sh
+helm upgrade --install agogevx ./deploy/helm/agogevx \
+  --set postgres.password="$(openssl rand -base64 32)" \
+  -n agogevx --create-namespace
+```
+
+Then watch `kubectl -n agogevx get pods -w` and open the domain (the one-node
+trial: `https://localhost/`) for the setup wizard (accept the self-signed cert).
+The wizard collects the domain, public URLs, NVD/MSRC/Resend keys, admin account,
+and license — exactly as on Compose. None of those belong in chart values.
 
 ### Running locally-built images (no GHCR pull)
 
@@ -94,7 +120,7 @@ Docker Desktop shares its image store with its Kubernetes node, so you can skip
 the registry:
 
 ```sh
-helm upgrade --install agogevx ./deploy/helm/agogevx -f deploy/helm/agogevx/values-staging.yaml \
+helm upgrade --install agogevx ./deploy/helm/agogevx \
   --set image.pullPolicy=Never --set imagePullSecrets=null \
   --set postgres.password="$(openssl rand -base64 32)" -n agogevx
 ```
@@ -117,9 +143,39 @@ helm upgrade agogevx ./deploy/helm/agogevx -n agogevx --reuse-values --set image
 helm uninstall agogevx -n agogevx
 ```
 
+## Upgrading to chart 0.8.0
+
+Chart 0.8.0 runs 3 pods of every service except the database by default. Read these three points
+before you upgrade a release that an older chart made. Across chart versions, use
+`--reset-then-reuse-values` (as `vx k8s update` does), not `--reuse-values`: the old value tree
+lacks the keys the new chart added.
+
+1. **Memory.** The release takes the new defaults, so each service whose count it did not set runs
+   3 pods. A one-node compose-mode release (a plain `helm install` of `values.yaml`) then asks for
+   about 14.4 GiB of memory requests, up from about 6.1 GiB, and on a small machine some pods wait
+   in Pending. A multi-node release with the in-cluster database at tier S asks for about 16.6 GiB.
+   *Way out:* give the nodes more memory, or keep that release small:
+   `helm upgrade agogevx <chart> -n agogevx --reset-then-reuse-values --set matcher.replicas=1`
+   (each matcher pod reserves 3 GiB).
+2. **Blobs on disks in a multi-node mode.** A release that runs `loadbalancer` or `ingress` with
+   `persistence.blobVolumeKind: pvc` on `ReadWriteOnce` disks (for example one made with the old
+   `values-ingress.yaml`) no longer renders: pods on different nodes cannot share those disks, and
+   1 api pod and 1 report-worker pod already share report-artifacts. `vx k8s update` and
+   `helm upgrade` stop with a message that names the fix, and nothing changes. *Way out:* set up S3
+   (System → Storage), copy the files you keep from the disks (uploads, avatars and evidence;
+   report files can be made again), then upgrade with `persistence.blobVolumeKind=emptyDir`. A new
+   install can use `ReadWriteMany` disks instead; an existing disk cannot change its access mode.
+3. **`values-ingress.yaml` keeps blobs in S3 now** (`blobVolumeKind: emptyDir`). Its documented
+   command, run over a release made with the old file, makes Helm delete the user-uploads and
+   report-artifacts disks and the files on them. S3 does not move files that are already on a disk.
+   *Way out:* set up S3 and copy those files first, as in point 2.
+
+A compose-mode release keeps working with `vx k8s update` and `vx k8s resize`. `vx k8s deploy`
+refuses to switch it to a multi-node mode, because Helm would delete its one-node disks.
+
 ## Scaling / multi-node
 
-The default values run single-node because every pod that shares a
+The default `deployMode: compose` runs on one node because every pod that shares a
 `ReadWriteOnce` PVC lands on the same node. **Multi-node is supported with only
 `ReadWriteOnce` block storage + S3 — no `ReadWriteMany` (NFS) class is required.**
 Use `values-multinode.yaml` (see `plans/finished/deploy/k8s/2026-06-13-deploy-k8s-bootstrap_secret_migration.md`, the
@@ -130,11 +186,12 @@ choice):
 
 - **`loadbalancer` (default, recommended):** a `Service type: LoadBalancer` is the
   external entry — the cloud provisions the load balancer on any provider — and the
-  frontend **Caddy obtains its own Let's Encrypt cert (ACME)**. No nginx-ingress, no
+  stack **obtains its own Let's Encrypt cert (ACME)**. No nginx-ingress, no
   cert-manager, nothing to pre-install. `postgres-data` uses the cluster's default
   RWO StorageClass (`storageClass: ""`). After install, point your domain's DNS at
-  the load balancer IP. The frontend runs at 1 replica (Caddy's local cert store);
-  the api scales to N.
+  the load balancer IP. The api and the frontend both scale to N (3 by default):
+  the api obtains the Let's Encrypt cert and publishes it into the `frontend-tls`
+  Secret, which every frontend pod mounts.
 - **`ingress` (opt-in; regulated/shared clusters, e.g. IL5):** `deployMode=ingress`
   + `ingress.enabled=true` hand TLS to a **pre-installed** nginx-ingress +
   cert-manager (the controller's own LoadBalancer Service is the entry). Frontend
@@ -143,11 +200,11 @@ choice):
 The api/storage/blob points below apply to **both** profiles. The single-node
 blockers are resolved like this:
 
-1. **frontend → N replicas (ingress profile only):** `deployMode=ingress` +
+1. **frontend → N replicas (both profiles):** `deployMode=ingress` +
    `ingress.enabled=true` hand TLS to nginx-ingress + cert-manager and gate off the
    api's Caddy admin push, so the frontend serves the SPA over HTTP at N replicas.
-   (Under `loadbalancer` the frontend stays at 1 — Caddy keeps its cert locally; a
-   future shared cert store on S3/Postgres would unpin it without nginx.)
+   Under `loadbalancer` every frontend pod serves the cert the api publishes into
+   the `frontend-tls` Secret, so it scales to N too.
 2. **api → N replicas (B2, shipped):** in `ingress` mode every secret is sourced
    from the `agogevx-secrets` Secret (crypto secrets + the Fernet `BOOTSTRAP_KEY` +
    the pgbouncer password — injected as env / a mounted file) and every non-secret
@@ -159,10 +216,14 @@ blockers are resolved like this:
 3. **Shared blobs (B3):** configure **object storage** on the admin Storage page
    (System → Storage → a private S3 bucket) and set
    `persistence.blobVolumeKind=emptyDir`. The api then carries no RWO blob PVC and
-   scales across nodes. **Configure S3 before scaling api/report-worker past 1**, or
-   blobs (avatars, rendered reports) land on per-pod disk and 404 cross-pod.
-   *All-RWX fallback (no object store):* keep `blobVolumeKind=pvc` and set the
-   `userUploads`/`reportArtifacts` accessMode to `ReadWriteMany` instead.
+   scales across nodes. The api and the report-worker run 3 pods by default, so
+   **configure S3 on first boot**, or blobs (avatars, rendered reports) land on
+   per-pod disk and 404 cross-pod. *All-RWX fallback (no object store):* keep
+   `blobVolumeKind=pvc` and set the `userUploads`/`reportArtifacts` accessMode to
+   `ReadWriteMany` instead. In a multi-node mode the render fails when two or more
+   pods would share a `ReadWriteOnce` blob disk (every api pod mounts user-uploads;
+   every api and report-worker pod mounts report-artifacts, so 1 of each already
+   share it), and the message names both fixes.
 
 `pdb.enabled=true` + `topologySpread.enabled=true` add PodDisruptionBudgets (for
 workloads >1 replica) and soft node spread. `postgres-data` is always
@@ -185,7 +246,7 @@ Postgres via PgBouncer, S3 blobs, PDBs, topology spread, NetworkPolicy) — appl
 
 | Overlay | Agents | K8s nodes (min) | Dedicated Postgres | matcher | pgbouncer `defaultPoolSize` | DB `max_connections` ≥ |
 |---|---|---|---|---|---|---|
-| `values-prod-25k.yaml`  | ≤ 25,000  | 3 × 4 vCPU / 8 GB   | 4 vCPU / 16 GB / NVMe  | 3  | 60  | 250 |
+| `values-prod-25k.yaml`  | ≤ 25,000  | 3 × 4 vCPU / 16 GB  | 4 vCPU / 16 GB / NVMe  | 3  | 60  | 250 |
 | `values-prod-50k.yaml`  | ≤ 50,000  | 3 × 4 vCPU / 16 GB  | 4 vCPU / 16 GB / NVMe  | 5  | 70  | 300 |
 | `values-prod-100k.yaml` | ≤ 100,000 | 3 × 8 vCPU / 16 GB  | 8 vCPU / 32 GB / NVMe  | 10 | 80  | 350 |
 | `values-prod-150k.yaml` | ≤ 150,000 | 3 × 8 vCPU / 32 GB  | 8 vCPU / 32 GB / NVMe  | 15 | 100 | 400 |
@@ -193,9 +254,9 @@ Postgres via PgBouncer, S3 blobs, PDBs, topology spread, NetworkPolicy) — appl
 | `values-prod-250k.yaml` | ≤ 250,000 | 5 × 8 vCPU / 32 GB  | 16 vCPU / 64 GB / NVMe | 25 | 150 | 600 |
 
 Every other component (`api`, `frontend`, `pgbouncer`, `ingestion`, `report`,
-`maintenance`, `bte`, `auditForward`) stays at the **3-replica HA floor** across
-all tiers — only the matcher (throughput) and PgBouncer pool (connection budget)
-scale. Each file's header carries the per-tier connection-budget math; size the
+`maintenance`, `bte`, `auditForward`, `mcp`) stays at the **3-replica HA floor**
+across all tiers — only the matcher (throughput) and PgBouncer pool (connection
+budget) scale. Each file's header carries the per-tier connection-budget math; size the
 dedicated Postgres `max_connections` to the value in the last column before
 installing.
 
@@ -203,8 +264,10 @@ installing.
 (`--deploy-profile loadbalancer|ingress`, or the TUI/web multi-node profiles),
 choosing a fleet size of `25k`…`250k` makes vx deploy with
 `-f values-prod-<tier>.yaml` (and the sizing `--set`s are suppressed so the file
-is authoritative). These tiers require a dedicated/managed Postgres — pass
-`--external-db` (the wizard's external-DB step). To install by hand instead:
+is authoritative). These tiers require a dedicated/managed Postgres: pass
+`--external-db` and its flags (the terminal UI takes the database only from those
+flags), or tick **external / managed Postgres** in the web console. The S, M, L
+and XL tiers use the in-cluster database instead. To install by hand instead:
 
 ```sh
 # Provision the dedicated Postgres + its Secrets first (see the file header), then:
@@ -226,13 +289,14 @@ See [values.yaml](values.yaml) for the full set with comments. It mirrors
 
 | Key | Default | Purpose |
 |---|---|---|
-| `image.org` / `image.version` | `agoge-io` / `2.7` | GHCR org + image tag |
+| `image.org` / `image.version` | `agoge-io` / the release tag | GHCR org + image tag |
 | `postgres.password` / `postgres.existingSecret` | `""` | **required** at install |
 | `domain` | `localhost` | public hostname (never an IP) |
 | `db.route` | `direct` | `direct` or `pgbouncer` |
-| `deployMode` | `compose` | `compose` (single-node, api-issued TLS) \| `loadbalancer` (multi-node, LoadBalancer Service + Caddy self-ACME) \| `ingress` (multi-node behind nginx-ingress + cert-manager) |
-| `matcher.replicas` | `1` | matcher scale (1→20 across fleet sizes) |
-| `api.replicas` | `1` | api scale — honoured under `ingress` AND `loadbalancer` (multi-node) |
+| `deployMode` | `compose` | `compose` (one node, api-issued TLS; a plain `helm install` trial — `vx` does not deploy it) \| `loadbalancer` (multi-node, LoadBalancer Service; the api obtains the Let's Encrypt cert and every frontend pod serves it) \| `ingress` (multi-node behind nginx-ingress + cert-manager) |
+| `matcher.replicas` | `3` | matcher scale (3 → 25 across fleet sizes) |
+| `api.replicas` / `frontend.replicas` | `3` | honoured under `ingress` AND `loadbalancer` (multi-node); compose mode pins both to 1 |
+| `<service>.replicas` (pgbouncer, ingestion, report, maintenance, bte, auditForward, mcp) | `3` | the HA floor; only `db` runs 1 |
 | `frontend.serviceType` | `LoadBalancer` | external 80/443 entry (compose + loadbalancer modes) |
 | `frontend.lbAnnotations` | `{}` | provider-specific annotations on the `frontend-lb` Service |
 | `persistence.accessMode` / `.storageClass` | `ReadWriteOnce` / `""` | global default inherited per-volume |

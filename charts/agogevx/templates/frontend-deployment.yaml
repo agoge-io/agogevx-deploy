@@ -54,9 +54,9 @@ spec:
               app.kubernetes.io/component: frontend
 {{- else if (include "agogevx.isCompose" .) }}
       # Compose mode: tls-certs is RWO and shared (api writes, frontend reads), so
-      # the frontend must co-locate with api. In loadbalancer mode the frontend
-      # OWNS tls-certs (api never mounts it) and runs at 1 replica, so no affinity
-      # is needed — it schedules anywhere and attaches its RWO volume there.
+      # the frontend must co-locate with api. The loadbalancer and ingress modes
+      # take the branch above: there the frontend runs frontend.replicas pods and
+      # mounts no shared disk (the frontend-tls Secret, or the HTTP-only ConfigMap).
       affinity:
         podAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

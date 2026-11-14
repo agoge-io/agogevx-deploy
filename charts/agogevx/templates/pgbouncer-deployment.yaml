@@ -12,10 +12,10 @@ metadata:
     app.kubernetes.io/component: pgbouncer
 spec:
   # HA floor (ha-floor-no-spof). pgbouncer is on the request path — every app
-  # query dials it — so a single replica is a whole-stack SPOF. Multi-node values
-  # raise this to 3 (different nodes, see topologySpread below). RollingUpdate so a
-  # helm upgrade never drops all poolers at once. Compose keeps the values default
-  # of 1 (a single host can't survive its own failure).
+  # query dials it — so a single replica is a whole-stack SPOF. The chart default
+  # is 3 in every mode (different nodes, see topologySpread below). RollingUpdate so
+  # a helm upgrade never drops all poolers at once. The Docker Compose install runs
+  # 1 (a single host can't survive its own failure).
   replicas: {{ .Values.pgbouncer.replicas }}
   strategy:
     type: RollingUpdate

@@ -28,16 +28,25 @@
 # ------------------------------------------
 # PgBouncer relay: 3 replicas × defaultPoolSize=100 = 300 upstream slots.
 # DB connection limit (16-vCPU/64-GB managed DB): 997.
-# Client connections at this configuration:
-#   20 matcher  × pool=4  =  80
-#    3 api      × pool=10 =  30
-#    3 bte      × pool=8  =  24
-#    3 ingestion × pool=5 =  15
-#    1 maintenance × pool=4 =  4
-#    3 report   × pool=4  =  12
-#    3 audit-forward × pool=4 = 12
-#                           -----
-#   Total                  ~177  (≤300 at the relay; far under the 997 DB cap)
+# Client connections through PgBouncer at this configuration (30 matchers, on
+# top of values-multinode.yaml, so every other service runs 3 pods):
+#   30 matcher       × pool=8              = 240
+#    3 api           × pool=10             =  30
+#    3 bte           × pool=8 + overflow 4 =  36
+#    3 ingestion     × pool=5              =  15
+#    3 maintenance   × pool=6              =  18
+#    3 report        × pool=4              =  12
+#    3 audit-forward × pool=4              =  12
+#    3 mcp           × pool=5              =  15
+#                                           -----
+#   Total                                    378
+# 378 is above the 300 relay cap. PgBouncer runs in transaction mode, so a
+# client over the cap waits for a free server connection; it does not fail.
+# At 20 matchers (the realistic-rate count) the total is 298.
+# DIRECT connections (bypass PgBouncer): the matcher cache pool (30 × 2 = 60)
+# and about 10-25 lock and refresh connections (api, ingestion, maintenance,
+# report). The DB peak is about 300 + 15 reserve pool + 60 + 25 = 400, far
+# under the 997 DB cap.
 # =============================================================================
 
 matcher:

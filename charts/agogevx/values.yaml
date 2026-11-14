@@ -1,19 +1,21 @@
 # =============================================================================
 # Default values for the AGOGE VX Helm chart.
 #
-# This file mirrors customer_pack/docker/.env.example. Override per environment with
-#   helm install ... -f values-staging.yaml
+# This file mirrors customer_pack/docker/.env.example. A plain helm install of this
+# file runs the one-node compose mode (a trial; vx does not deploy it). Override per
+# environment with an overlay, for example the multi-node one:
+#   helm install ... -f values-multinode.yaml
 # Secrets (postgres.password) must NEVER be committed — pass via --set or a
 # pre-created Secret (postgres.existingSecret).
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Images — the same nine images ghcr_push.ps1 publishes for the Compose path.
+# Images — the same 11 images vx publishes for the Compose path.
 # -----------------------------------------------------------------------------
 image:
   registry: ghcr.io
   org: agoge-io            # AGOGEVX_GHCR_ORG
-  version: "3.11"           # AGOGEVX_VERSION — the release tag to deploy
+  version: "3.12"           # AGOGEVX_VERSION — the release tag to deploy
   pullPolicy: IfNotPresent # use Never to run locally-built images on Docker Desktop
   names:
     api: agogevx-api
@@ -41,13 +43,18 @@ imagePullSecrets:
 domain: localhost
 
 # Deployment-mode selector (compose | ingress | loadbalancer).
-#   compose      (default) = single-node: the api issues certs (lego), pushes
-#                Caddy config, and the frontend Caddy terminates TLS. api/frontend
-#                pinned to 1.
+#   compose      (default) = one node, for a trial with a plain helm install of
+#                this file: the api issues certs (lego), pushes Caddy config, and
+#                the frontend Caddy terminates TLS. The templates pin the api and
+#                the frontend to 1 pod here; every other service runs its
+#                replicas value (3). vx does not deploy this mode: vx deploys
+#                loadbalancer or ingress only. For one machine, use the Docker
+#                Compose install.
 #   loadbalancer = multi-node, self-contained: a Service type=LoadBalancer is the
-#                external entry and the frontend Caddy obtains its OWN Let's Encrypt
-#                cert (ACME). No nginx-ingress, no cert-manager. api scales to N;
-#                frontend stays 1. The recommended cloud default — see
+#                external entry. The api obtains the Let's Encrypt cert (ACME)
+#                and publishes it into the frontend-tls Secret that every
+#                frontend pod mounts. No nginx-ingress, no cert-manager. The api
+#                and the frontend scale to N. The recommended cloud default — see
 #                values-multinode.yaml. Keep ingress.enabled=false.
 #   ingress      = multi-node behind an EXISTING nginx-ingress + cert-manager
 #                (regulated/shared clusters, e.g. IL5). Set together with
@@ -108,10 +115,12 @@ pgbouncer:
   # CONNECTION BUDGET INVARIANT. When db.route=pgbouncer (l/xl tiers) the poolers
   # front the whole stack and are the dominant upstream-connection source:
   #     pgbouncer.replicas × defaultPoolSize  ≤  DB max_connections − ~30 reserve
-  # 3 × 100 = 300 upstream fits the in-cluster Postgres (raised to max_connections
-  # 350 in db-config.yaml; ~20-25 headroom after the reserve-pool burst + ingestion's
-  # direct CONCURRENTLY/advisory conns) and a ≥397-conn managed DB. Was 200 (a single-
-  # pooler ceiling). Raise the pool ONLY after raising the DB's max_connections.
+  # 3 × 100 = 300 upstream fits the in-cluster Postgres (max_connections 400 in
+  # db-config.yaml: about 35 free after the reserve-pool burst (3 × 5), the matcher
+  # cache pool (10 × 2 at XL) and the direct lock and refresh conns of the api,
+  # ingestion, maintenance and report workers) and a ≥397-conn managed DB. Was 200
+  # (a single-pooler ceiling). Raise the pool ONLY after raising the DB's
+  # max_connections.
   defaultPoolSize: 100
   minPoolSize: 5
   reservePoolSize: 5
@@ -120,20 +129,20 @@ pgbouncer:
   serverIdleTimeout: 600
 
 # -----------------------------------------------------------------------------
-# api — pinned to 1 replica under compose mode (shared bootstrap-config volume +
-# runtime Caddy admin push). Under ingress mode (multi-node) it un-pins: secrets
-# come from the agogevx-secrets Secret and config from app_settings (no RWX
-# volume), blobs go to S3, then raise replicas. See the chart README
-# "Scaling / multi-node" section.
+# api — the HA floor is 3 pods. The template uses api.replicas in the
+# loadbalancer and ingress modes. In compose mode it pins the api to 1 pod: the
+# api writes first-boot secrets to the one-node bootstrap-config volume and
+# pushes Caddy config to one frontend pod. In the multi-node modes, secrets come
+# from the agogevx-secrets Secret, config from app_settings (no RWX volume) and
+# blobs from S3. See the chart README "Scaling / multi-node" section.
 # -----------------------------------------------------------------------------
 api:
-  # Only honoured under ingress mode (multi-node). Under compose mode the api is
-  # always 1 (RWO bootstrap volume + Caddy admin push to a single frontend pod).
-  # Safe to run >1 from the very first boot: vx mints the full secret set at
+  # Used in the loadbalancer and ingress modes. Compose mode always runs 1.
+  # 3 pods are safe from the first boot: vx mints the full secret set at
   # install (crypto secrets + Fernet BOOTSTRAP_KEY + pgbouncer password) into
-  # agogevx-secrets, and non-secret config lives in app_settings — so every replica
-  # reads identical secrets/config with no first-boot ordering or restart.
-  replicas: 1
+  # agogevx-secrets, and non-secret config lives in app_settings, so every
+  # replica reads the same secrets and config with no first-boot order or restart.
+  replicas: 3
   dbPoolSize: 10
   # Name of a Secret (created out-of-band by `vx k8s secrets init`, never
   # committed) holding the first-boot crypto secrets SECRET_KEY / API_KEY_PEPPER /
@@ -160,7 +169,7 @@ api:
 # Workers. Replica counts are the primary scale knobs (matcher first).
 # -----------------------------------------------------------------------------
 matcher:
-  replicas: 1              # <=1k:1  1k-10k:2-4  10k-50k:5-10  50k-100k:10  250k:20-30
+  replicas: 3              # HA floor 3 to 25k · 5 at 50k · 10 at 100k · 15/20/25 at 150k/200k/250k
   # MUST stay >= 2 x concurrency (8). pool <= concurrency deadlocks under saturation
   # (job holds its tx conn + needs a 2nd for the AffectedProductsCache fill). The old
   # "drop to 2 at high replica counts" guidance shipped that deadlock — superseded by
@@ -212,9 +221,9 @@ matcher:
           app.kubernetes.io/component: matcher-worker
 
 ingestion:
-  # HA floor: dev/compose 1; multi-node 3 (values-multinode.yaml). Advisory-lock
-  # arbitrated, so the extra replicas are warm standbys — only one runs each sync.
-  replicas: 1
+  # HA floor 3. An advisory lock for each sync source lets one pod run each
+  # sync, so the other pods are warm standbys.
+  replicas: 3
   dbPoolSize: 5
   nvdApiKey: ""            # optional; also settable via the setup wizard
   msrcApiKey: ""           # optional
@@ -230,17 +239,27 @@ ingestion:
       memory: 4Gi
 
 report:
-  replicas: 1
+  replicas: 3
   dbPoolSize: 4
   concurrency: 2
 
-# maintenance-worker — hosts the heavy operational scheduler loops relocated
-# from the api (asset-summary, network-reclassify, advisory-index, retention,
-# nightly housekeeping, object-storage backup) plus the async DB-restore
-# drainer. Single replica is enough; each loop self-arbitrates across replicas
-# via pg_try_advisory_*lock.
+# maintenance-worker — runs the heavy scheduled loops that moved out of the api
+# (asset-summary, fleet-rollup, tactic-summary, network-reclassify,
+# advisory-index, retention, nightly housekeeping, object-storage backup) and
+# the async DB-restore and backup drainers. The HA floor is 3 pods. Each loop
+# has a guard that makes 3 pods safe:
+#   - asset-summary, fleet-rollup, tactic-summary, network-reclassify: a session
+#     lock for the whole tick.
+#   - advisory-index: the lock in the CONCURRENTLY matview refresh.
+#   - housekeeping: a session lock on a direct connection for the whole run.
+#   - host-visibility, os-version: no lock; SKIP LOCKED shares the rows.
+#   - backup schedule: no lock; a partial unique index drops a second job.
+#   - retention, xray-archive: the lock gates the start only. The deletes are
+#     idempotent, so 2 pods that prune at the same time do no harm.
+#   - restore and backup drainers: a transaction lock, NOT EXISTS(running) and
+#     SKIP LOCKED, so one pod runs each job.
 maintenance:
-  replicas: 1
+  replicas: 3
   # 6, not 4: the restore drainer now runs here and holds ~2 conns during a
   # restore (the ImportBackup tx + the monitor's progress writer). Worst-case
   # overlap = restore(2) + scheduled backup(2) + retention(1) + housekeeping(1).
@@ -250,10 +269,10 @@ maintenance:
   # pg_dump stream) that can burst up to an 8Gi ceiling. The large headroom is
   # for the async DB-restore drainer that now runs here: an intel restore streams
   # and inserts the whole intel archive and OOMKilled at 1Gi (stage, 2026-07-03),
-  # so it's sized well above any observed peak. Only one replica restores at a
-  # time (single-flight), and 8Gi is half a 16Gi node, so the other pods on the
+  # so it is sized well above any observed peak. One pod restores at a time (the
+  # drainer guard above), and 8Gi is half a 16Gi node, so the other pods on the
   # node keep ample room. request < limit = Burstable QoS; the 512Mi request
-  # keeps all 3 replicas schedulable. cpu request left at the global 50m.
+  # keeps all 3 pods schedulable. cpu request left at the global 50m.
   # Overrides the global `resources` default via the componentResources helper.
   resources:
     requests:
@@ -263,32 +282,33 @@ maintenance:
       memory: 8Gi
 
 bte:
-  replicas: 1
+  replicas: 3
   dbPoolSize: 8
   dbMaxOverflow: 4
 
 auditForward:
-  replicas: 1
+  replicas: 3
   dbPoolSize: 4
 
 # MCP server — read-only vulnerability-intelligence tools over streamable HTTP
-# for external AI clients (behind Caddy at /mcp). OFF unless mcp_enabled +
-# Business "mcp" license. Analyst-volume, off the agent check-in path → a small
-# pool is plenty. On K8s, raise replicas to >=2 for the HA floor (values-
-# multinode.yaml); a single node loss must not drop MCP capacity.
+# for external AI clients (behind Caddy at /mcp). The tools answer only when
+# mcp_enabled is on and the licence has "mcp". It serves analysts, not the agent
+# check-in path, so a small pool is enough. The HA floor is 3 pods: the server
+# keeps no state, and the mcp-server Service sends each request to any pod.
 mcp:
-  replicas: 1
+  replicas: 3
   dbPoolSize: 5
 
 # -----------------------------------------------------------------------------
-# frontend — Caddy + SPA. Pinned to 1 replica in v1 (the api pushes Caddy
-# config to a single pod). External entry is a separate LoadBalancer Service.
+# frontend — Caddy + SPA. The external entry is a separate LoadBalancer Service
+# (compose and loadbalancer modes) or the Ingress (ingress mode).
 # -----------------------------------------------------------------------------
 frontend:
-  # Pinned to 1 under compose mode (the api pushes Caddy config to a single
-  # pod). Under ingress mode (ingress.enabled=true) this un-pins — raise it for
-  # edge throughput / HA across nodes.
-  replicas: 1
+  # The HA floor is 3 pods. The template uses frontend.replicas when
+  # ingress.enabled is true or deployMode is loadbalancer. In compose mode it
+  # pins the frontend to 1 pod: the api pushes Caddy config to one pod
+  # (http://frontend:2019), and the tls-certs disk is one-node.
+  replicas: 3
   # Service type for the external 80/443 entry point. Docker Desktop maps
   # LoadBalancer to localhost. On minikube use NodePort, or run `minikube tunnel`.
   # Used in compose + loadbalancer modes; under ingress the external entry is the
@@ -361,7 +381,13 @@ persistence:
   #              all-RWX fallback by setting the per-volume accessMode below).
   #   emptyDir = per-pod scratch; blobs live in S3 (multi-node default). The api's
   #              blob PVC mounts are dropped so it can scale across nodes; configure
-  #              object storage on the admin Storage page BEFORE scaling past 1.
+  #              object storage on the admin Storage page on first boot (the api
+  #              runs 3 pods by default).
+  # In the multi-node modes (ingress, loadbalancer) the render fails when pvc
+  # keeps the blobs on a ReadWriteOnce disk that two or more pods would share
+  # (agogevx.validateBlobVolumes): user-uploads is mounted by every api pod, and
+  # report-artifacts by every api and report-worker pod, so 1 api + 1 report pod
+  # already share it. Use emptyDir + S3, or the all-RWX fallback.
   blobVolumeKind: pvc
 
   # Per-volume accessMode / storageClass overrides. "" inherits the global value

@@ -99,9 +99,12 @@ elseif ($GhcrUser -or $GhcrToken) {
 
 # 4) Next step -------------------------------------------------------------
 Write-Host ""
-Write-Host "Secrets are in the cluster (never in git). Install without passing a password:"
+Write-Host "Secrets are in the cluster (never in git). Install without passing a password."
+Write-Host "Multi-node cluster (the supported layout):"
 Write-Host "  helm upgrade --install agogevx ./deploy/helm/agogevx ``"
-Write-Host "    -f ./deploy/helm/agogevx/values-staging.yaml ``"
+Write-Host "    -f ./deploy/helm/agogevx/values-multinode.yaml --set domain=<your FQDN> ``"
 Write-Host "    -n $Namespace --create-namespace"
+Write-Host "One-node trial (the chart's compose mode, values.yaml alone):"
+Write-Host "  helm upgrade --install agogevx ./deploy/helm/agogevx -n $Namespace --create-namespace"
 Write-Host ""
 Write-Host "The chart references the '$SecretName' Secret by default — no --set postgres.password needed."

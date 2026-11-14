@@ -45,14 +45,21 @@ data:
     autovacuum_max_workers = 4
     autovacuum_vacuum_cost_limit = 1000
 
-    # Sized for the HA-floor pgbouncer budget (ha-floor-no-spof). When
-    # db.route=pgbouncer (l/xl tiers) the 3 poolers front the whole stack:
-    # 3 × defaultPoolSize(100) = 300 steady upstream conns, + reserve_pool_size
-    # burst (3×5) + ingestion's direct CONCURRENTLY/advisory-lock conns that bypass
-    # pgbouncer + superuser_reserved ≈ 320-330 worst case. 350 leaves ~20-25 headroom.
-    # Keep this ≥ pgbouncer.replicas × defaultPoolSize + ~30; an external/managed DB
-    # must offer at least the same (the floor's smallest validated managed DB is 397).
-    max_connections = 350
+    # Sized for the HA-floor connection budget (replica floor plan, Part 6). The
+    # worst case is tier XL with db.route=pgbouncer, where the 3 poolers front
+    # the whole stack:
+    #   relay, 3 × defaultPoolSize(100) ............... 300
+    #   reserve_pool_size burst, 3 × 5 ................  15
+    #   matcher cache pool, direct, 10 × 2 at XL ......  20
+    #   direct lock and refresh conns (api, ingestion,
+    #     maintenance, report) ........................ 10-25
+    #   superuser_reserved_connections ................   3
+    #   total ......................................... about 350-365
+    # 400 leaves about 35 free. The direct route (tiers S/M, every service at 3
+    # pods, no relay) needs about 195-210. Keep this ≥ pgbouncer.replicas ×
+    # defaultPoolSize + the rows above. An external/managed DB must offer at least
+    # the total (the floor's smallest validated managed DB offers 397).
+    max_connections = 400
     random_page_cost = 1.1
     effective_io_concurrency = 200
     maintenance_work_mem = 1GB

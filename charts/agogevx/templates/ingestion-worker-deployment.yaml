@@ -9,8 +9,8 @@ spec:
   # HA floor (ha-floor-no-spof). The scheduler is advisory-lock arbitrated
   # (pg_try_advisory_xact_lock per source), so extra replicas are warm standbys —
   # only one runs each sync, the others are ready to take over. Raised above 1 so a
-  # node failure can't take out ingestion scheduling. Compose keeps the values
-  # default of 1.
+  # node failure can't take out ingestion scheduling. The chart default is 3 in
+  # every mode; the Docker Compose install runs 1.
   replicas: {{ .Values.ingestion.replicas }}
   selector:
     matchLabels:
@@ -35,6 +35,20 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- if (include "agogevx.isCompose" .) }}
+      # Compose mode: bootstrap-config is RWO, so co-locate with api. Without this
+      # a pod on another node of a multi-node cluster stays in ContainerCreating
+      # with a Multi-Attach error. Under ingress/loadbalancer the bootstrap volume
+      # is dropped (BOOTSTRAP_KEY env), so the worker spreads freely.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agogevx
+                  app.kubernetes.io/component: api
+              topologyKey: kubernetes.io/hostname
+{{- end }}
 {{- if .Values.topologySpread.enabled }}
       # Soft node spread — keep the warm-standby replicas on different nodes so a
       # node loss leaves a standby ready to win the advisory lock. ScheduleAnyway

@@ -4,12 +4,13 @@ Frontend Services.
 Compose & loadbalancer topology (ingress.enabled=false):
   - "frontend"     ClusterIP. MUST be named exactly "frontend" and expose 2019
                    so the api can push Caddy config to http://frontend:2019
-                   (compose only; in loadbalancer mode Caddy self-ACMEs and the
-                   api never pushes, but the port is harmless). 2019 stays
+                   (compose only; in loadbalancer mode Caddy serves the cert from
+                   the frontend-tls Secret and the api never pushes, but the port
+                   is harmless). 2019 stays
                    cluster-internal — never on the LB.
   - "frontend-lb"  External entry for 80/443 (type = frontend.serviceType). On a
                    cloud cluster this provisions the cloud load balancer; Caddy
-                   terminates TLS (compose: api-issued; loadbalancer: self-ACME).
+                   terminates TLS with an api-issued cert in both modes.
                    Docker Desktop binds LoadBalancer to localhost.
 
 Ingress topology (ingress.enabled=true):
