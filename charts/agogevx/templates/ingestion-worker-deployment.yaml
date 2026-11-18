@@ -82,13 +82,20 @@ spec:
               value: {{ .Values.ingestion.nvdApiKey | quote }}
             - name: MSRC_API_KEY
               value: {{ .Values.ingestion.msrcApiKey | quote }}
+            # The release that the start line prints and the feeds' User-Agent
+            # names ("AGOGE-VX/<version>"), as the other services carry it.
+            - name: AGOGEVX_VERSION
+              value: {{ .Values.image.version | quote }}
           resources:
             {{- include "agogevx.componentResources" (dict "root" . "component" .Values.ingestion) | nindent 12 }}
           volumeMounts:
-            # Read-only root FS: the ubuntu_uct source clones into os.TempDir
-            # (/tmp/valex-uct, re-cloned fresh each run — deliberately NOT the
-            # retired /var/lib/valex uct-repo volume, see ubuntuuct.go), so /tmp
-            # must be writable. emptyDir keeps the root filesystem read-only.
+            # Read-only root FS, so /tmp must be writable: the osv source
+            # downloads each ecosystem dump to /tmp before it reads it (up to
+            # 4 GiB a dump), and the ubuntu_uct and cissvc sources clone into
+            # /tmp (/tmp/agogevx-uct and /tmp/agogevx-vulnrichment, re-cloned
+            # fresh each run — deliberately NOT the retired /var/lib/valex
+            # uct-repo volume, see ubuntuuct.go). emptyDir keeps the root
+            # filesystem read-only; ingestion.tmpSizeLimit sizes it.
             - name: tmp
               mountPath: /tmp
 {{- if (include "agogevx.isCompose" .) }}
@@ -107,7 +114,8 @@ spec:
 {{- end }}
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.ingestion.tmpSizeLimit | default "8Gi" | quote }}
 {{- if (include "agogevx.isCompose" .) }}
         - name: bootstrap-config
           persistentVolumeClaim:

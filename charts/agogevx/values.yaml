@@ -15,7 +15,7 @@
 image:
   registry: ghcr.io
   org: agoge-io            # AGOGEVX_GHCR_ORG
-  version: "3.12"           # AGOGEVX_VERSION — the release tag to deploy
+  version: "3.13"           # AGOGEVX_VERSION — the release tag to deploy
   pullPolicy: IfNotPresent # use Never to run locally-built images on Docker Desktop
   names:
     api: agogevx-api
@@ -227,6 +227,13 @@ ingestion:
   dbPoolSize: 5
   nvdApiKey: ""            # optional; also settable via the setup wizard
   msrcApiKey: ""           # optional
+  # Size limit of the pod's /tmp emptyDir (node disk, not memory). The osv
+  # source downloads each ecosystem dump there before it reads it (up to its
+  # 4 GiB cap; Chainguard's dump was 1.19 GB on 2026-11-17) and deletes it after
+  # the read. The ubuntu_uct and cissvc sources keep a shallow git clone there
+  # until their next run (the Ubuntu CVE Tracker pack is about 300 MB). Above
+  # the limit the kubelet evicts the pod.
+  tmpSizeLimit: 8Gi
   # Burstable memory headroom for ingestion only (plans/finished/intel/ingestion/2026-07-10-intel-ingestion-uct_sync_oom_fix.md
   # WS5 / decision D3): the UCT parser fix targets <1Gi, this is insurance
   # while the Ubuntu dataset grows. Small reservation, 4Gi ceiling — no other

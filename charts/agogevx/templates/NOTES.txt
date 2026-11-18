@@ -44,6 +44,9 @@ WARNING: no Postgres password found. db and api will fail to start. Provide one:
   - run `vx k8s secrets init` first (it creates the agogevx-postgres Secret in this namespace), or
   - --set postgres.password=$(openssl rand -base64 32), or
   - --set postgres.existingSecret=<secret-with-POSTGRES_PASSWORD>
+  A kept postgres-data PVC (chart 0.8.1 keeps it over helm uninstall) holds a database that
+  opens only with its old password. Restore the Secrets that made it
+  (vx k8s secrets restore --bundle <file>), or delete that PVC to start an empty database.
 {{- end }}
 
 Scaling the matcher (the primary throughput knob):
@@ -53,7 +56,10 @@ Scaling the matcher (the primary throughput knob):
 
 Tearing it down (vx keeps your data unless you opt in):
 
-     vx k8s teardown --namespace {{ .Release.Namespace }} --non-interactive --yes                    # helm uninstall, PVCs kept
-     vx k8s teardown --namespace {{ .Release.Namespace }} --non-interactive --yes --delete-namespace # also deletes data
+     vx k8s teardown --namespace {{ .Release.Namespace }} --non-interactive --yes                    # helm uninstall; PVCs, agogevx-postgres and agogevx-secrets kept
+     vx k8s teardown --namespace {{ .Release.Namespace }} --non-interactive --yes --delete-namespace # also deletes the PVCs, the data and every Secret
+
+   A plain `helm uninstall` also keeps every PVC and the chart's agogevx-postgres Secret
+   (helm.sh/resource-policy: keep). A reinstall over them needs the same release name.
 
 Full runbook: docs/internal_documentation/kubernetes-deployment.md

@@ -13,6 +13,15 @@ its temp dir; matches the docker-compose removal).
 
 Per-volume accessMode/storageClass come from persistence.volumes.<key>, falling
 back to the global persistence.accessMode / persistence.storageClass.
+
+Every claim carries helm.sh/resource-policy: keep (chart 0.8.1 and later). Without
+it, a helm upgrade that stops rendering a claim (a deployMode switch, a
+blobVolumeKind switch, an external database) deletes the claim and the files on
+its disk, and helm uninstall deletes every claim. With it, Helm leaves the claim
+and its disk in place: delete a kept claim by hand (kubectl delete pvc) to
+remove its data. A release made by an older chart gets the annotation at its
+first upgrade to 0.8.1; the chart README gives the kubectl annotate step that
+protects that first upgrade too.
 */ -}}
 {{- $g := .Values.persistence -}}
 {{- /* postgres-data is only provisioned for the in-cluster DB. With an external
@@ -55,6 +64,8 @@ metadata:
   labels:
     {{- include "agogevx.commonLabels" $ | nindent 4 }}
     app.kubernetes.io/component: storage
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
     - {{ $accessMode }}

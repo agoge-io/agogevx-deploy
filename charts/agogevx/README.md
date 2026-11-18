@@ -35,7 +35,8 @@ Under the default (compose) mode five `ReadWriteOnce` PVCs hold state:
 provisioned — secrets move to the `agogevx-secrets` Secret, non-secret config to
 Postgres `app_settings`, and blobs to S3 (see **Scaling / multi-node**). (The old
 `uct-repo` volume was retired — the `ubuntu_uct` ingestion source clones into its
-container temp dir, matching the docker-compose removal.)
+container temp dir, matching the docker-compose removal.) Helm keeps every PVC
+over `helm uninstall` and over a mode switch: see **Kept disks**.
 
 > Service names `db`, `pgbouncer`, `api`, and `frontend` are **fixed** — the
 > images hardcode them (`DATABASE_URL` host, `http://frontend:2019` Caddy admin,
@@ -90,6 +91,7 @@ so the secrets `vx` created are picked up automatically.
 Multi-node, with the password inline:
 
 ```sh
+# A new password is for a first install only. A reinstall over kept PVCs gives the old one (Kept disks).
 helm upgrade --install agogevx ./deploy/helm/agogevx \
   -f deploy/helm/agogevx/values-multinode.yaml \
   --set domain=agogevx.example.com \
@@ -104,6 +106,7 @@ memory, mostly 3 matchers × 3 GiB; add `--set matcher.replicas=1` on a small
 machine.
 
 ```sh
+# A new password is for a first install only. A reinstall over kept PVCs gives the old one (Kept disks).
 helm upgrade --install agogevx ./deploy/helm/agogevx \
   --set postgres.password="$(openssl rand -base64 32)" \
   -n agogevx --create-namespace
@@ -120,6 +123,7 @@ Docker Desktop shares its image store with its Kubernetes node, so you can skip
 the registry:
 
 ```sh
+# A new password is for a first install only. A reinstall over kept PVCs gives the old one (Kept disks).
 helm upgrade --install agogevx ./deploy/helm/agogevx \
   --set image.pullPolicy=Never --set imagePullSecrets=null \
   --set postgres.password="$(openssl rand -base64 32)" -n agogevx
@@ -139,9 +143,69 @@ helm upgrade agogevx ./deploy/helm/agogevx -n agogevx --reuse-values --set db.ro
 # Bump the deployed image tag
 helm upgrade agogevx ./deploy/helm/agogevx -n agogevx --reuse-values --set image.version=2.4
 
-# Uninstall (PVCs are retained — delete them explicitly to wipe data)
+# Uninstall (keeps the PVCs and the chart's agogevx-postgres Secret — delete them by hand to wipe data)
 helm uninstall agogevx -n agogevx
 ```
+
+## Kept disks
+
+Chart 0.8.1 and later put `helm.sh/resource-policy: keep` on every PVC, and on the
+`agogevx-postgres` Secret that the chart makes from `postgres.password`. Helm then
+never deletes them:
+
+- `helm uninstall` keeps the PVCs, the files on them and the password Secret. Its
+  output lists them as "kept due to the resource policy".
+- A `helm upgrade` that stops rendering a PVC also keeps it: a switch of
+  `deployMode` or of `persistence.blobVolumeKind`, or a switch to an external
+  database. The kept PVC stays unused until a release renders it again.
+- To delete the data, delete the PVCs by hand
+  (`kubectl delete pvc -n <namespace> <name>`), or delete the namespace.
+
+**A reinstall over kept PVCs.** Use the same release name: each kept object
+carries `meta.helm.sh/release-name`, and Helm refuses to adopt it into a release of
+another name. Keep the access mode and the storage class of each PVC, and its size
+(a larger size works only when the storage class allows volume expansion): Helm
+cannot change the spec of an existing PVC. Give the same `postgres.password` as
+before, or `--set postgres.existingSecret=agogevx-postgres` to use the kept Secret.
+A new password does not open the kept database. For an empty start instead,
+delete the kept PVCs, or install in a new namespace.
+
+**A switch back.** A switch from an external database back to the in-cluster
+database, or from a multi-node mode back to `compose`, renders the kept PVCs again.
+The release then gets the old data back: the old database with its old password,
+and the old first-boot files. Delete the kept PVCs first for an empty start.
+
+`vx k8s teardown` keeps the same disks. By default it deletes only the GHCR pull
+Secret `ghcr-creds`, and keeps `agogevx-postgres` and `agogevx-secrets`, because
+only those two open the kept database. `--keep-secrets` keeps `ghcr-creds` too, and
+`--delete-namespace` deletes everything. Over a kept `postgres-data` PVC,
+`vx k8s secrets init` and `vx k8s deploy` refuse to run without those two
+Secrets, and init also refuses `--rotate`. Restore them with
+`vx k8s secrets restore --bundle <file>`, or delete the PVC to start an empty
+database.
+
+## Upgrading to chart 0.8.1
+
+Chart 0.8.1 adds the keep annotation of **Kept disks**. The upgrade restarts every
+pod once, because the `helm.sh/chart` label of each pod template changes.
+
+Helm decides the delete of an upgrade from the live PVC, and the delete of an
+uninstall from the stored release. The live PVCs of a release that an older chart
+made have no annotation, so an upgrade to 0.8.1 that also switches the mode still
+deletes them. Before the first upgrade to 0.8.1, annotate the live PVCs of the
+release:
+
+```sh
+kubectl annotate pvc -n <namespace> -l app.kubernetes.io/instance=<release> helm.sh/resource-policy=keep
+```
+
+That protects the PVCs in that same upgrade, also one that switches the mode. An
+old multi-node release with blob PVCs on `ReadWriteOnce` disks cannot render 0.8.x
+with unchanged values (point 2 below), so its first upgrade is such a switch. The
+0.8.1 upgrade then stores the annotation in the release, so a later
+`helm uninstall` keeps the PVCs too. The step changes nothing else and is safe to
+run again. It does not protect a `helm uninstall` of the old release: an uninstall
+reads the stored release, so upgrade to 0.8.1 before you uninstall.
 
 ## Upgrading to chart 0.8.0
 
@@ -163,15 +227,20 @@ lacks the keys the new chart added.
    1 api pod and 1 report-worker pod already share report-artifacts. `vx k8s update` and
    `helm upgrade` stop with a message that names the fix, and nothing changes. *Way out:* set up S3
    (System → Storage), copy the files you keep from the disks (uploads, avatars and evidence;
-   report files can be made again), then upgrade with `persistence.blobVolumeKind=emptyDir`. A new
-   install can use `ReadWriteMany` disks instead; an existing disk cannot change its access mode.
+   report files can be made again), then upgrade with `persistence.blobVolumeKind=emptyDir`. Run
+   the `kubectl annotate` step of **Upgrading to chart 0.8.1** first: then the upgrade to 0.8.1
+   keeps the old disks, unused, and you delete them when you no longer need them. A new install
+   can use `ReadWriteMany` disks instead; an existing disk cannot change its access mode.
 3. **`values-ingress.yaml` keeps blobs in S3 now** (`blobVolumeKind: emptyDir`). Its documented
-   command, run over a release made with the old file, makes Helm delete the user-uploads and
-   report-artifacts disks and the files on them. S3 does not move files that are already on a disk.
+   command, run over a release made with the old file, stops rendering the user-uploads and
+   report-artifacts disks. A chart older than 0.8.1 then makes Helm delete them and the files on
+   them; chart 0.8.1 keeps them when their live PVCs carry the keep annotation (the
+   `kubectl annotate` step). Either way, S3 does not move files that are already on a disk.
    *Way out:* set up S3 and copy those files first, as in point 2.
 
 A compose-mode release keeps working with `vx k8s update` and `vx k8s resize`. `vx k8s deploy`
-refuses to switch it to a multi-node mode, because Helm would delete its one-node disks.
+refuses to switch it to a multi-node mode: the new mode does not use its one-node disks, and a
+release that no upgrade to chart 0.8.1 has touched also loses them.
 
 ## Scaling / multi-node
 
@@ -297,6 +366,7 @@ See [values.yaml](values.yaml) for the full set with comments. It mirrors
 | `matcher.replicas` | `3` | matcher scale (3 → 25 across fleet sizes) |
 | `api.replicas` / `frontend.replicas` | `3` | honoured under `ingress` AND `loadbalancer` (multi-node); compose mode pins both to 1 |
 | `<service>.replicas` (pgbouncer, ingestion, report, maintenance, bte, auditForward, mcp) | `3` | the HA floor; only `db` runs 1 |
+| `ingestion.tmpSizeLimit` | `8Gi` | the ingestion-worker's `/tmp` (node disk): the OSV dumps (up to 4 GiB each, deleted after the read) and the Ubuntu and CISA git clones |
 | `frontend.serviceType` | `LoadBalancer` | external 80/443 entry (compose + loadbalancer modes) |
 | `frontend.lbAnnotations` | `{}` | provider-specific annotations on the `frontend-lb` Service |
 | `persistence.accessMode` / `.storageClass` | `ReadWriteOnce` / `""` | global default inherited per-volume |
