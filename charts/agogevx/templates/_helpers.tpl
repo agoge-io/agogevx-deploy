@@ -92,12 +92,15 @@ Name of the Secret holding POSTGRES_PASSWORD (existing or chart-created).
 {{- end -}}
 
 {{/*
-Shared DB env block (POSTGRES_PASSWORD from Secret, DB_HOST/DB_PORT, DATABASE_URL).
-DATABASE_URL uses Kubernetes $(VAR) expansion against the earlier vars so the
-password stays only in the Secret. Emit under `env:` with `| nindent N`.
+Shared DB env block (PGPASSWORD from the Secret key POSTGRES_PASSWORD,
+DB_HOST/DB_PORT, DATABASE_URL). The password is not in any URL: pgx reads
+PGPASSWORD when the URL has no password, so a password with `/ ? # % "` or a
+space works. A template cannot escape a Secret value inside a URL. DATABASE_URL
+uses Kubernetes $(VAR) expansion against the earlier DB_HOST and DB_PORT.
+Emit under `env:` with `| nindent N`.
 */}}
 {{- define "agogevx.dbEnv" -}}
-- name: POSTGRES_PASSWORD
+- name: PGPASSWORD
   valueFrom:
     secretKeyRef:
       name: {{ include "agogevx.postgresSecretName" . }}
@@ -112,12 +115,12 @@ password stays only in the Secret. Emit under `env:` with `| nindent N`.
 # External direct (sub-mode B): the app pool dials the external DB itself, so
 # DATABASE_URL carries the TLS params. CA is mounted on every pod here.
 - name: DATABASE_URL
-  value: "postgresql://{{ include "agogevx.dbUser" . }}:$(POSTGRES_PASSWORD)@$(DB_HOST):$(DB_PORT)/{{ include "agogevx.dbName" . }}?sslmode={{ .Values.postgres.external.sslMode }}&sslrootcert=/etc/valex/db-ca.crt"
+  value: "postgresql://{{ include "agogevx.dbUser" . }}@$(DB_HOST):$(DB_PORT)/{{ include "agogevx.dbName" . }}?sslmode={{ .Values.postgres.external.sslMode }}&sslrootcert=/etc/valex/db-ca.crt"
 {{- else }}
 # Internal, or external pooled (sub-mode A): the app pool talks to the in-cluster
 # pgbouncer/db over the trusted cluster network, so sslmode=disable.
 - name: DATABASE_URL
-  value: "postgresql://{{ include "agogevx.dbUser" . }}:$(POSTGRES_PASSWORD)@$(DB_HOST):$(DB_PORT)/{{ include "agogevx.dbName" . }}?sslmode=disable"
+  value: "postgresql://{{ include "agogevx.dbUser" . }}@$(DB_HOST):$(DB_PORT)/{{ include "agogevx.dbName" . }}?sslmode=disable"
 {{- end }}
 {{- if .Values.postgres.external.enabled }}
 # Direct-to-external DSN over TLS — consumed by api + ingestion-worker (boot
@@ -125,7 +128,7 @@ password stays only in the Secret. Emit under `env:` with `| nindent N`.
 # migrate.DirectPGDSN. Always points at the external host (NOT the pgbouncer
 # hop), regardless of sub-mode. Harmless/unused on workers that never dial direct.
 - name: DIRECT_DATABASE_URL
-  value: "postgresql://{{ include "agogevx.dbUser" . }}:$(POSTGRES_PASSWORD)@{{ .Values.postgres.external.host }}:{{ .Values.postgres.external.port }}/{{ include "agogevx.dbName" . }}?sslmode={{ .Values.postgres.external.sslMode }}&sslrootcert=/etc/valex/db-ca.crt"
+  value: "postgresql://{{ include "agogevx.dbUser" . }}@{{ .Values.postgres.external.host }}:{{ .Values.postgres.external.port }}/{{ include "agogevx.dbName" . }}?sslmode={{ .Values.postgres.external.sslMode }}&sslrootcert=/etc/valex/db-ca.crt"
 {{- end }}
 {{- end -}}
 

@@ -26,6 +26,10 @@ spec:
   strategy:
     type: Recreate
 {{- end }}
+  # A boot can last 960 s before the api answers (go/cmd/api/boot_budget.go).
+  # Kubernetes marks a rollout failed after 600 s by default, so the deadline
+  # is longer than the boot.
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app.kubernetes.io/name: agogevx
@@ -183,13 +187,16 @@ spec:
           ports:
             - name: http
               containerPort: 5000
-          # Migrations run at boot (goose) — allow generous startup time.
+          # Migrations run at boot (goose), and nothing answers until the boot
+          # ends. A boot can last 960 s: the 600 s boot timeout plus the 360 s
+          # pool wait (go/cmd/api/boot_budget.go). 204 × 5 s = 1,020 s covers it
+          # with a 60 s margin. TestBootBudget_ChartCoversIt holds the sum.
           startupProbe:
             httpGet:
               path: /health/live
               port: 5000
             periodSeconds: 5
-            failureThreshold: 30
+            failureThreshold: 204
           livenessProbe:
             httpGet:
               path: /health/live

@@ -45,7 +45,8 @@ if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
 }
 
 function New-RandomAlphanumeric([int]$Length) {
-    # URL-safe (A-Za-z0-9 only) so the password is safe inside DATABASE_URL.
+    # A-Za-z0-9 only, so the value needs no quoting in a shell or a kubectl
+    # command. (The pods send the password as PGPASSWORD, not inside a URL.)
     $alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     try {

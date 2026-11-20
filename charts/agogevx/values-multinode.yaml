@@ -13,8 +13,9 @@
 #   - a cloud cluster whose provider implements Service type=LoadBalancer
 #     (DOKS/EKS/GKE/AKS all do) — the chart provisions the LB itself
 #   - a real public FQDN whose DNS you control: AFTER install, point it at the
-#     load balancer's external IP; the frontend Caddy then obtains the Let's
-#     Encrypt cert for it automatically (ACME) — no cert-manager
+#     load balancer's external IP; the api then obtains the Let's Encrypt cert
+#     for it automatically (ACME HTTP-01) and publishes it to the frontend-tls
+#     Secret that every frontend pod serves — no cert-manager
 #   - no StorageClass setup: the cluster's default RWO class is used (storageClass:"")
 #
 # For the INGRESS profile instead (regulated/shared clusters, e.g. IL5 — set
